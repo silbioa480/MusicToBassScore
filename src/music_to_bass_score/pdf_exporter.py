@@ -417,30 +417,48 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
     # \rounded-box can compute the correct box height (unlike \draw-line which has
     # zero extent and causes top/bottom border clipping).
     # Y range -0.3..1.8 covers the full ascent/descent of \large bold text.
+    vbar_w = 0.88  # horizontal width of one divider: \hspace 0.4 + box 0.08 + \hspace 0.4
     vbar = " \\hspace #0.4 \\filled-box #'(-0.04 . 0.04) #'(-0.3 . 1.8) #0 \\hspace #0.4 "
-    # barspace must equal vbar horizontal width (0.4+0.4=0.8) so chord names
-    # stay aligned above each degree cell.
+    # barspace must equal vbar horizontal width so chord names stay aligned above cells.
     barspace = ' \\hspace #0.8 '
+    # Advance per measure cell (cell width + one divider) — used to pad short final
+    # rows out to a full row's width so they left-align under the rows above.
+    cell_advance = _CELL_WIDTH + vbar_w
+    filler_chord = f'\\hcenter-in #{_CELL_WIDTH} \\transparent "x"'
 
-    # One top-level \markup block per row → LilyPond paginates between blocks.
+    # One \markup block per row. Every row is padded to _MEASURES_PER_LINE cells wide
+    # so all center-columns share an identical width → \fill-line centers them to the
+    # SAME left edge. A short final row keeps its real content on the left (the padding
+    # is invisible filler on the right), so it appears left-aligned with the rows above.
     rows: list[str] = []
     for i in range(0, len(cells), _MEASURES_PER_LINE):
         row = cells[i:i + _MEASURES_PER_LINE]
-        # \hspace #0.4 prefix/suffix on chord_line matches the \pad-markup #0.4
-        # horizontal padding on the degree box so cells stay vertically aligned.
-        chord_line = ' \\hspace #0.4 ' + barspace.join(c for c, _ in row) + ' \\hspace #0.4 '
-        # Degree strip: only INNER dividers between measures; no outer bars.
+        n = len(row)
+        missing = _MEASURES_PER_LINE - n
+
+        # Chord-name line: real cells + invisible filler cells out to full width.
+        chord_cells = [c for c, _ in row] + [filler_chord] * missing
+        chord_line = ' \\hspace #0.4 ' + barspace.join(chord_cells) + ' \\hspace #0.4 '
+
+        # Degree strip: only real cells with INNER dividers (no outer bars). A trailing
+        # \hspace pads the box line out to a full row's width, keeping the box on the left.
         deg_strip = vbar.join(d for _, d in row)
-        # \pad-around #0.4 reserves space OUTSIDE the rounded-box outline (including
-        # its rounded corners) so the top/bottom border is never clipped by the chord
-        # line above or the system boundary. \pad-to-box INSIDE keeps a consistent box
-        # height across rows. \fill-line centers the whole block horizontally on the page.
+        # \pad-around #0.5 reserves space OUTSIDE the rounded-box outline (incl. rounded
+        # corners) so the top/bottom border is never clipped. \pad-to-box INSIDE keeps a
+        # consistent box height across rows.
+        box = (
+            '\\pad-around #0.5 \\rounded-box \\pad-to-box #\'(0 . 0) #\'(-0.3 . 2.1) '
+            f'\\line {{ {deg_strip} }}'
+        )
+        if missing:
+            box_line = f'\\line {{ {box} \\hspace #{missing * cell_advance:.2f} }}'
+        else:
+            box_line = box
+
         rows.append(
-            '\\markup \\vspace #0.8\n'
             '\\markup \\fill-line { \\center-column { '
             f'\\line {{ {chord_line} }} '
-            '\\pad-around #0.4 \\rounded-box \\pad-to-box #\'(0 . 0) #\'(-0.3 . 2.1) '
-            f'\\line {{ {deg_strip} }} '
+            f'{box_line} '
             '} }'
         )
     body = "\n".join(rows)
@@ -464,6 +482,11 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
   top-margin = 15\\mm
   left-margin = 12\\mm
   right-margin = 12\\mm
+  % Uniform gap between rows. `padding` guarantees a minimum clearance between each
+  % row's bounding box, so a box outline can never be clipped by its neighbours.
+  markup-system-spacing.basic-distance = #11
+  markup-system-spacing.padding = #2
+  markup-system-spacing.minimum-distance = #9
 }}
 
 {body}
