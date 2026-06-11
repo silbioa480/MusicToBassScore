@@ -112,26 +112,57 @@ def _estimate_bpm_and_beats(y: np.ndarray, sr: int) -> tuple[float, np.ndarray]:
     return tempo, beats
 
 
+# Plausible tempo band for octave candidates (J-pop / pop / rock covers).
+_TEMPO_MIN = 55.0
+_TEMPO_MAX = 210.0
+
+
 def _correct_tempo_octave(tempo_bt: float, y: np.ndarray, sr: int) -> float:
     """Fix beat_track's frequent half/double-tempo (octave) errors.
 
-    beat_track often locks onto half or double the true tempo (e.g. reports 75 for a
-    150 BPM song). The autocorrelation-based `librosa.feature.tempo` is more reliable
-    for the overall tempo, so we pick whichever octave of the beat_track tempo
-    (×0.5, ×1, ×2) lies closest to that autocorrelation estimate.
+    beat_track is built around a log-normal tempo prior centred at 120 BPM, so it
+    routinely locks onto *half* the true tempo of a fast song (e.g. reports 86 for a
+    172 BPM track, 75 for 150, 99 for 198) — the halved value sits closer to 120 in
+    log space than the true tempo does, and the prior wins.
+
+    An autocorrelation reference carries the same 120-centred bias, so instead we read
+    the actual periodicity strength straight from the tempogram. Among the octave
+    candidates (×0.5, ×1, ×2 of the beat_track tempo) that fall in a plausible band,
+    we pick the one whose tempogram energy is highest — i.e. the periodicity the signal
+    itself expresses most strongly. This snaps genuinely fast songs up to their true
+    tempo without relying on any prior, while a song that really is slow keeps its
+    lower octave because that is where its periodicity peaks.
     """
     if tempo_bt <= 0:
         return tempo_bt
+
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
-    tempo_ac = float(
-        librosa.feature.tempo(onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH)[0]
+    tempogram = librosa.feature.tempogram(
+        onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH
     )
-    candidates = [tempo_bt * 0.5, tempo_bt, tempo_bt * 2.0]
-    corrected = min(candidates, key=lambda c: abs(c - tempo_ac))
+    tempo_freqs = librosa.tempo_frequencies(
+        tempogram.shape[0], hop_length=HOP_LENGTH, sr=sr
+    )
+    mean_tempogram = tempogram.mean(axis=1)
+
+    def energy_at(bpm: float) -> float:
+        idx = int(np.argmin(np.abs(tempo_freqs - bpm)))
+        return float(mean_tempogram[idx])
+
+    candidates = [
+        bpm
+        for bpm in (tempo_bt * 0.5, tempo_bt, tempo_bt * 2.0)
+        if _TEMPO_MIN <= bpm <= _TEMPO_MAX
+    ]
+    if not candidates:  # beat_track tempo itself out of band — keep it as-is
+        return tempo_bt
+
+    corrected = max(candidates, key=energy_at)
     if abs(corrected - tempo_bt) > 1e-3:
         logger.info(
-            "Tempo octave corrected: beat_track=%.1f → %.1f (autocorr=%.1f)",
-            tempo_bt, corrected, tempo_ac,
+            "Tempo octave corrected: beat_track=%.1f → %.1f "
+            "(tempogram energy %.3f vs %.3f)",
+            tempo_bt, corrected, energy_at(corrected), energy_at(tempo_bt),
         )
     return corrected
 
