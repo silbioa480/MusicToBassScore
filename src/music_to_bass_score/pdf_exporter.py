@@ -231,6 +231,8 @@ def _score_to_ly(score: stream.Score, stem: str) -> str:
     tempo_lily = f"\\tempo 4 = {bpm}"
 
     # ── Notes: bass (with chord markup) & tab (bare) ─────────────────────────
+    MEASURES_PER_LINE = 4
+
     bass_lines: list[str] = []
     tab_lines:  list[str] = []
 
@@ -242,6 +244,11 @@ def _score_to_ly(score: stream.Score, stem: str) -> str:
 
         bass_lines.append(f"  {_measure_to_ly(measure, beats, chord_label)}  % m{i+1}")
         tab_lines.append(f"  {_measure_to_ly(measure, beats, None)}")
+
+        # Force a line break every MEASURES_PER_LINE measures
+        if (i + 1) % MEASURES_PER_LINE == 0:
+            bass_lines.append("  \\break")
+            tab_lines.append("  \\break")
 
     bass_block = "\n".join(bass_lines)
     tab_block  = "\n".join(tab_lines)
@@ -274,6 +281,7 @@ def _score_to_ly(score: stream.Score, stem: str) -> str:
   system-system-distance = #\'((basic-distance . 14) (minimum-distance . 10) (stretchability . 6))
   ragged-last-bottom = ##f
   ragged-bottom = ##f
+  ragged-last = ##t
 }}
 
 global = {{
@@ -301,7 +309,8 @@ tabNotes = {{
   \\layout {{
     \\context {{
       \\Score
-      \\override SpacingSpanner.common-shortest-duration = #(ly:make-moment 1/8)
+      proportionalNotationDuration = #(ly:make-moment 1/8)
+      \\override SpacingSpanner.uniform-stretching = ##t
     }}
   }}
 }}
