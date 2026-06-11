@@ -221,3 +221,6 @@ __marimo__/
 tmp/
 output/
 logs/*.log
+
+# Vendored BTC chord model (fetch via scripts/setup_btc.py)
+third_party/

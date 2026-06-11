@@ -54,16 +54,70 @@ def detect_chords_per_measure(
     measure_grid: Optional[list[float]] = None,
     sample_rate: int = SAMPLE_RATE,
 ) -> list[list[tuple[float, str]]]:
-    """Detect chord changes per measure at beat resolution.
+    """Detect chord changes per measure.
 
-    Returns a list (one entry per measure) of (beat_offset, chord_symbol) tuples.
-    Each measure is analyzed beat-by-beat, then consecutive identical chords are
-    collapsed — so a measure with one chord yields one entry, and a measure where the
-    chord changes N times yields N entries at their respective beat offsets.
-    `audio_path` should be the FULL mix (harmony needed for chord quality).
+    Returns a list (one entry per measure) of (beat_offset, chord_symbol) tuples,
+    with consecutive identical chords collapsed to change points.
+
+    Primary engine: the pretrained BTC Transformer (large vocabulary). Falls back to
+    the librosa chroma matcher if BTC is unavailable or errors. `audio_path` should be
+    the FULL mix (harmony needed for chord quality).
     """
+    if measure_grid and len(measure_grid) >= 1:
+        try:
+            from . import btc_chord
+            if btc_chord.is_available():
+                return _chords_from_btc(audio_path, measure_grid, time_sig_num, bpm)
+            logger.warning("BTC model not found; using chroma fallback")
+        except Exception as exc:
+            logger.warning("BTC chord recognition failed (%s); using chroma fallback", exc)
+
+    return _detect_chords_chroma(audio_path, bpm, time_sig_num, measure_grid, sample_rate)
+
+
+def _chords_from_btc(
+    audio_path: Path,
+    measure_grid: list[float],
+    time_sig_num: int,
+    bpm: float,
+) -> list[list[tuple[float, str]]]:
+    """Map the BTC chord timeline onto half-measure windows of the constant-tempo grid."""
+    from . import btc_chord
+
     logger.info(
-        "Detecting chords (full-mix HPSS+tuning, half-measure): %s (bpm=%.1f time_sig=%d/4 grid=%s)",
+        "Detecting chords (BTC large-voca): %s (bpm=%.1f time_sig=%d/4 grid=%d measures)",
+        audio_path, bpm, time_sig_num, len(measure_grid),
+    )
+    timeline = btc_chord.recognize_chords(audio_path)
+    seconds_per_measure = (60.0 / bpm) * time_sig_num
+    segs = _measure_segments(time_sig_num)
+
+    measures: list[list[tuple[float, str]]] = []
+    for m_start in measure_grid:
+        seg_chords = []
+        for s_frac, e_frac in segs:
+            ws = m_start + s_frac * seconds_per_measure
+            we = m_start + e_frac * seconds_per_measure
+            beat_offset = s_frac * time_sig_num
+            seg_chords.append((beat_offset, btc_chord.chord_at_window(timeline, ws, we)))
+        measures.append(seg_chords)
+
+    measures = _smooth_chord_sequence(measures)
+    preview = ["|".join(s for _, s in m) for m in measures[:6]]
+    logger.info("BTC chord mapping complete: %d measures — %s", len(measures), preview)
+    return measures
+
+
+def _detect_chords_chroma(
+    audio_path: Path,
+    bpm: float,
+    time_sig_num: int,
+    measure_grid: Optional[list[float]],
+    sample_rate: int,
+) -> list[list[tuple[float, str]]]:
+    """Fallback: librosa chroma template matching (half-measure resolution)."""
+    logger.info(
+        "Detecting chords (chroma fallback, half-measure): %s (bpm=%.1f time_sig=%d/4 grid=%s)",
         audio_path, bpm, time_sig_num,
         f"{len(measure_grid)} measures" if measure_grid else "none",
     )

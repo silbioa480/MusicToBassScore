@@ -348,9 +348,10 @@ tabNotes = {{
 # ── Chord-chart builder (banded row box: one box per row, measures split by bars) ──
 
 _MEASURES_PER_LINE = 4
-# 21 staff-spaces per cell. Combined with set-global-staff-size 17 (below), 4 cells +
-# inner dividers always fit inside A4's 186 mm text area even with long two-degree cells.
-_CELL_WIDTH = 21
+# 24 staff-spaces per cell. Combined with set-global-staff-size 18 and 8 mm side
+# margins, 4 cells + inner dividers fill the page width with minimal side whitespace
+# while still fitting long two-degree cells.
+_CELL_WIDTH = 24
 
 
 def _measure_cell_parts(measure) -> tuple[str, str]:
@@ -468,7 +469,7 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
     return f'''\\version "2.24.0"
 \\language "english"
 
-#(set-global-staff-size 17)
+#(set-global-staff-size 18)
 
 \\header {{
   title = "{title}"
@@ -480,13 +481,16 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
 \\paper {{
   #(set-paper-size "a4")
   top-margin = 15\\mm
-  left-margin = 12\\mm
-  right-margin = 12\\mm
-  % Uniform gap between rows. `padding` guarantees a minimum clearance between each
-  % row's bounding box, so a box outline can never be clipped by its neighbours.
-  markup-system-spacing.basic-distance = #11
-  markup-system-spacing.padding = #2
-  markup-system-spacing.minimum-distance = #9
+  left-margin = 8\\mm
+  right-margin = 8\\mm
+  % ragged-bottom disables vertical justification, so rows keep their natural spacing
+  % and are NEVER compressed (which was clipping the tallest box outlines). Content
+  % simply flows onto another page when it doesn't fit.
+  ragged-bottom = ##t
+  ragged-last-bottom = ##t
+  % Uniform, generous gap between rows.
+  markup-system-spacing.basic-distance = #14
+  markup-system-spacing.padding = #1
 }}
 
 {body}
