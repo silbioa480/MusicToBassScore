@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Callable, Literal, Optional
 
 from .analyzer import AudioAnalysis, analyze_audio
+from .logger import get_logger
+
+logger = get_logger(__name__)
 from .chord_detector import detect_chords_per_measure
 from .config import AUDIO_DIR, MIDI_DIR, SCORES_DIR, STEMS_DIR
 from .downloader import SongMetadata, download_audio
@@ -39,10 +42,12 @@ def run_pipeline(
     progress_cb receives (status_message, fraction_0_to_1) at each stage.
     """
     def _cb(msg: str, frac: float) -> None:
+        logger.debug("Pipeline progress [%.0f%%]: %s", frac * 100, msg)
         if progress_cb:
             progress_cb(msg, frac)
 
     scores_out = output_dir or SCORES_DIR
+    logger.info("Pipeline started: url=%s tab=%s method=%s", youtube_url, include_tab, pdf_method)
 
     _cb("오디오 다운로드 중...", 0.0)
     song_metadata = download_audio(
@@ -94,6 +99,10 @@ def run_pipeline(
     )
 
     _cb("완료!", 1.0)
+    logger.info(
+        "Pipeline complete: title=%r pdf=%s",
+        song_metadata.title, export.pdf_path,
+    )
 
     return PipelineResult(
         metadata=song_metadata,

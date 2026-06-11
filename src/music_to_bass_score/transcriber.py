@@ -10,6 +10,9 @@ from .config import (
     MIDI_DIR,
     MIN_NOTE_DURATION_SEC,
 )
+from .logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -40,18 +43,28 @@ def transcribe_bass(
     from basic_pitch.inference import predict
     from basic_pitch import ICASSP_2022_MODEL_PATH
 
+    logger.info(
+        "Transcribing: %s (onset=%.2f frame=%.2f freq=%.0f–%.0fHz)",
+        bass_wav_path, onset_threshold, frame_threshold,
+        minimum_frequency, maximum_frequency,
+    )
+
     if progress_cb:
         progress_cb(0.1)
 
-    _, midi_data, note_events = predict(
-        str(bass_wav_path),
-        model_or_model_path=ICASSP_2022_MODEL_PATH,
-        onset_threshold=onset_threshold,
-        frame_threshold=frame_threshold,
-        minimum_note_length=min_note_duration * 1000,  # seconds → milliseconds
-        minimum_frequency=minimum_frequency,
-        maximum_frequency=maximum_frequency,
-    )
+    try:
+        _, midi_data, note_events = predict(
+            str(bass_wav_path),
+            model_or_model_path=ICASSP_2022_MODEL_PATH,
+            onset_threshold=onset_threshold,
+            frame_threshold=frame_threshold,
+            minimum_note_length=min_note_duration * 1000,  # seconds → milliseconds
+            minimum_frequency=minimum_frequency,
+            maximum_frequency=maximum_frequency,
+        )
+    except Exception as exc:
+        logger.error("Basic-Pitch transcription failed: %s", exc, exc_info=True)
+        raise
 
     if progress_cb:
         progress_cb(0.8)
@@ -64,6 +77,9 @@ def transcribe_bass(
     if progress_cb:
         progress_cb(1.0)
 
+    logger.info(
+        "Transcription complete: %d notes → %s", len(events), midi_path
+    )
     return TranscriptionResult(midi_path=midi_path, note_events=events)
 
 

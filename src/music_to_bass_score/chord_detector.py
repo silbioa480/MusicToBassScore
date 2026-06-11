@@ -7,6 +7,9 @@ import librosa
 import numpy as np
 
 from .config import HOP_LENGTH, SAMPLE_RATE
+from .logger import get_logger
+
+logger = get_logger(__name__)
 
 CHORD_TEMPLATES: dict[str, np.ndarray] = {}
 
@@ -46,6 +49,7 @@ def detect_chords_per_measure(
     sample_rate: int = SAMPLE_RATE,
 ) -> list[str]:
     """Detect chord labels for each measure of the audio."""
+    logger.info("Detecting chords: %s (bpm=%.1f, time_sig=%d/4)", audio_path, bpm, time_sig_num)
     y, sr = librosa.load(str(audio_path), sr=sample_rate, mono=True)
 
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=HOP_LENGTH)
@@ -68,6 +72,7 @@ def detect_chords_per_measure(
 
         measure_start += measure_period_frames
 
+    logger.info("Chord detection complete: %d measures — %s", len(chord_labels), chord_labels[:8])
     return chord_labels
 
 

@@ -8,6 +8,9 @@ from typing import Literal, Optional
 from music21 import stream
 
 from .config import LILYPOND_BIN, LILYPOND_TIMEOUT_SEC, SCORES_DIR
+from .logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -37,10 +40,14 @@ def export_to_pdf(
 ) -> ExportResult:
     """Render a music21 Score to PDF."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    lily_available = check_lilypond_available()
+    logger.info("Exporting PDF: method=%s lilypond_available=%s stem=%s", method, lily_available, filename_stem)
 
-    if method == "lilypond" and check_lilypond_available():
+    if method == "lilypond" and lily_available:
         return _export_via_lilypond(score, output_dir, filename_stem)
     else:
+        if method == "lilypond" and not lily_available:
+            logger.warning("LilyPond not found — falling back to MusicXML export")
         return _export_via_musicxml(score, output_dir, filename_stem)
 
 
@@ -65,6 +72,7 @@ def _export_via_lilypond(
     )
 
     if result.returncode != 0:
+        logger.error("LilyPond failed (exit %d):\n%s", result.returncode, result.stderr[-2000:])
         raise RuntimeError(
             f"LilyPond failed (exit {result.returncode}):\n{result.stderr[-2000:]}"
         )
@@ -78,6 +86,7 @@ def _export_via_lilypond(
                 f"LilyPond ran successfully but no PDF found in {output_dir}"
             )
 
+    logger.info("PDF exported via LilyPond: %s (%dKB)", pdf_path, pdf_path.stat().st_size // 1024)
     return ExportResult(pdf_path=pdf_path, lily_path=ly_path)
 
 

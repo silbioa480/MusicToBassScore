@@ -20,7 +20,10 @@ from music21 import (
 from .analyzer import AudioAnalysis
 from .config import BASS_MIDI_MAX, BASS_MIDI_MIN, BASS_STRING_TUNINGS
 from .downloader import SongMetadata
+from .logger import get_logger
 from .transcriber import NoteEvent
+
+logger = get_logger(__name__)
 
 
 def build_score(
@@ -31,6 +34,11 @@ def build_score(
     include_tab: bool = True,
 ) -> stream.Score:
     """Construct a music21 Score with bass clef staff and optional TAB."""
+    logger.info(
+        "Building score: %r by %r, %d notes, %d chords, tab=%s",
+        song_metadata.title, song_metadata.artist,
+        len(note_events), len(chord_labels), include_tab,
+    )
     score = stream.Score()
 
     md = metadata.Metadata()

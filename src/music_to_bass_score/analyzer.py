@@ -8,6 +8,9 @@ import librosa
 import numpy as np
 
 from .config import HOP_LENGTH, N_FFT, SAMPLE_RATE
+from .logger import get_logger
+
+logger = get_logger(__name__)
 
 KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -30,22 +33,31 @@ class AudioAnalysis:
 
 def analyze_audio(audio_path: Path) -> AudioAnalysis:
     """Load audio and extract BPM, key, and time signature."""
-    y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
-    duration = librosa.get_duration(y=y, sr=sr)
+    logger.info("Analyzing audio: %s", audio_path)
+    try:
+        y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+        duration = librosa.get_duration(y=y, sr=sr)
 
-    bpm = _estimate_bpm(y, sr)
-    key = _estimate_key(y, sr)
-    time_sig_num, time_sig_den = _estimate_time_signature(y, sr, bpm)
+        bpm = _estimate_bpm(y, sr)
+        key = _estimate_key(y, sr)
+        time_sig_num, time_sig_den = _estimate_time_signature(y, sr, bpm)
 
-    return AudioAnalysis(
-        bpm=bpm,
-        bpm_rounded=round(bpm),
-        key=key,
-        time_signature_num=time_sig_num,
-        time_signature_den=time_sig_den,
-        duration_sec=duration,
-        sample_rate=sr,
-    )
+        logger.info(
+            "Analysis done: bpm=%.1f key=%r time_sig=%d/%d duration=%.1fs",
+            bpm, key, time_sig_num, time_sig_den, duration,
+        )
+        return AudioAnalysis(
+            bpm=bpm,
+            bpm_rounded=round(bpm),
+            key=key,
+            time_signature_num=time_sig_num,
+            time_signature_den=time_sig_den,
+            duration_sec=duration,
+            sample_rate=sr,
+        )
+    except Exception as exc:
+        logger.error("Audio analysis failed: %s", exc, exc_info=True)
+        raise
 
 
 def _estimate_bpm(y: np.ndarray, sr: int) -> float:

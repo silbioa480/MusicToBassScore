@@ -12,6 +12,9 @@ import numpy as np
 import soundfile as sf
 
 from .config import DEMUCS_MODEL, SAMPLE_RATE, STEMS_DIR
+from .logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -34,10 +37,12 @@ def separate_bass(
     import julius
 
     resolved_device = _resolve_device(device)
+    logger.info("Separating bass: %s (model=%s device=%s)", audio_path, model_name, resolved_device)
 
     if progress_cb:
         progress_cb(0.05)
 
+    logger.debug("Loading Demucs model: %s", model_name)
     if progress_cb:
         progress_cb(0.10)
     model = get_model(model_name)
@@ -96,6 +101,8 @@ def separate_bass(
     if progress_cb:
         progress_cb(1.0)
 
+    size_kb = bass_path.stat().st_size // 1024
+    logger.info("Bass separation complete: %s (%dKB)", bass_path, size_kb)
     return SeparationResult(bass_path=bass_path, stems_dir=output_dir)
 
 

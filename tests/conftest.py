@@ -20,16 +20,30 @@ def sample_wav_path(tmp_path_factory) -> Path:
     wav_path = out_dir / "test_bass.wav"
 
     sr = 44100
-    duration = 4.0
-    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+    bpm = 120.0
+    duration = 8.0  # longer for reliable BPM detection
+    n_samples = int(sr * duration)
+    t = np.linspace(0, duration, n_samples, endpoint=False)
 
-    # Simulate bass note pattern: A1 (55 Hz) with harmonics
-    y = (
-        0.5 * np.sin(2 * np.pi * 55 * t)
-        + 0.25 * np.sin(2 * np.pi * 110 * t)
-        + 0.1 * np.sin(2 * np.pi * 165 * t)
-    )
-    y = (y * 0.8).astype(np.float32)
+    # Bass tones: A1(55Hz), C2(65Hz), E2(82Hz), G2(98Hz) per beat
+    y = np.zeros(n_samples, dtype=np.float32)
+    beat_period = int(sr * 60.0 / bpm)
+    notes = [55.0, 65.4, 82.4, 98.0]
+    for i, freq in enumerate(notes * int(duration)):
+        start = i * beat_period
+        end = min(start + beat_period, n_samples)
+        if start >= n_samples:
+            break
+        seg_t = t[start:end]
+        tone = (
+            0.5 * np.sin(2 * np.pi * freq * seg_t)
+            + 0.2 * np.sin(2 * np.pi * freq * 2 * seg_t)
+        )
+        # Sharp attack, quick decay — makes beat onsets detectable
+        decay = np.exp(-np.linspace(0, 6, end - start))
+        y[start:end] += (tone * decay).astype(np.float32)
+
+    y = np.clip(y / (np.abs(y).max() + 1e-8) * 0.8, -1.0, 1.0).astype(np.float32)
 
     sf.write(str(wav_path), y, sr)
     return wav_path
