@@ -348,8 +348,9 @@ tabNotes = {{
 # ── Chord-chart builder (banded row box: one box per row, measures split by bars) ──
 
 _MEASURES_PER_LINE = 4
-_CELL_WIDTH = 26        # markup units per measure cell (fixed for an even grid)
-_BAR_HEIGHT = 2.6       # height of the measure-divider vertical line (staff-spaces)
+# 22 staff-spaces per cell keeps 4 cells inside A4 (186 mm text area, ≈1.76 mm/ss)
+# 4×22 + 3×0.8 (inner vbars) + 0.8 (\pad-markup) + 7 (leading) ≈ 100 ss ≈ 176 mm ✓
+_CELL_WIDTH = 22
 
 
 def _measure_cell_parts(measure) -> tuple[str, str]:
@@ -412,23 +413,29 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
     measures = list(part.getElementsByClass('Measure'))
     cells = [_measure_cell_parts(m) for m in measures]
 
-    # Vertical measure-divider and a matching invisible spacer for the chord-name line
-    # Leading/trailing spaces are required so LilyPond tokenises correctly after a `}`
-    vbar = f' \\hspace #0.4 \\draw-line #\'(0 . {_BAR_HEIGHT}) \\hspace #0.4 '
+    # Internal measure-divider: \filled-box reports its extent to LilyPond so
+    # \rounded-box can compute the correct box height (unlike \draw-line which has
+    # zero extent and causes top/bottom border clipping).
+    # Y range -0.3..1.8 covers the full ascent/descent of \large bold text.
+    vbar = " \\hspace #0.4 \\filled-box #'(-0.04 . 0.04) #'(-0.3 . 1.8) #0 \\hspace #0.4 "
+    # barspace must equal vbar horizontal width (0.4+0.4=0.8) so chord names
+    # stay aligned above each degree cell.
     barspace = ' \\hspace #0.8 '
 
     # One top-level \markup block per row → LilyPond paginates between blocks.
     rows: list[str] = []
     for i in range(0, len(cells), _MEASURES_PER_LINE):
         row = cells[i:i + _MEASURES_PER_LINE]
-        chord_line = barspace.join(c for c, _ in row)
-        # Degree strip: measures separated by vbars, all wrapped in ONE rounded box
+        # \hspace #0.4 prefix/suffix on chord_line matches the \pad-markup #0.4
+        # horizontal padding on the degree box so cells stay vertically aligned.
+        chord_line = ' \\hspace #0.4 ' + barspace.join(c for c, _ in row) + ' \\hspace #0.4 '
+        # Degree strip: only INNER dividers between measures; no outer bars.
         deg_strip = vbar.join(d for _, d in row)
         rows.append(
             '\\markup \\vspace #0.8\n'
             '\\markup \\line { \\hspace #4 \\center-column { '
             f'\\line {{ {chord_line} }} '
-            f'\\rounded-box \\line {{ {vbar} {deg_strip} {vbar} }} '
+            f'\\rounded-box \\pad-markup #0.4 \\line {{ {deg_strip} }} '
             '} }'
         )
     body = "\n".join(rows)
