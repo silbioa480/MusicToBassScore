@@ -1,14 +1,18 @@
 # MusicToBassScore — Claude Code Project Guide
 
 ## Overview
-YouTube URL을 입력받아 베이스 기타 악보(PDF)를 자동 생성하는 웹 애플리케이션입니다.
-J-POP 커버 밴드 베이시스트를 위해 설계되었으며, 다음 파이프라인으로 동작합니다:
+YouTube URL/음원 파일을 입력받아 **코드 차트(코드 + 조표 기준 로마숫자 도수) PDF**를 자동 생성하는 웹 애플리케이션입니다.
+J-POP 커버 밴드 연주자를 위해 설계되었으며, 다음 파이프라인으로 동작합니다:
 
 ```
-YouTube URL → 오디오 다운로드 → 음원 분석 → 베이스 분리(AI) → 음표 전사(AI) → 악보 생성 → PDF 출력
+입력(URL/파일) → 오디오 다운로드 → 음원 분석(BPM/조성/박자) → 코드 감지(전체음원) → 로마숫자 도수 변환 → 코드 차트 생성 → PDF 출력
 ```
 
-사용자는 Streamlit 웹 UI에서 URL을 입력하고, 처리 완료 후 오선보 + TAB 형식의 PDF를 다운로드합니다.
+사용자는 Streamlit 웹 UI에서 입력하고, 처리 완료 후 **단일 오선보 코드 차트**(마디별 코드 2개 + 로마숫자 도수) PDF를 다운로드합니다.
+
+> **버전 안내**
+> - **v1.0** (`v1.0` 태그 / `claude/youtube-bass-tab-generator-w6av93` 브랜치): 베이스 오선보 + TAB. Demucs 베이스 분리 + Basic-Pitch 전사 기반.
+> - **현재(v2, `claude/chord-analysis`)**: 코드 확인용 차트. 베이스 노트 전사 한계로 목적을 코드/도수 분석으로 전환. **Demucs 분리·Basic-Pitch 전사 불필요** → 처리 시간 대폭 단축(수십 초).
 
 ---
 
@@ -129,13 +133,13 @@ MusicToBassScore/
 |---|---|
 | `config.py` | 모든 상수, 경로, 모델명, 임계값 정의 |
 | `downloader.py` | yt-dlp로 YouTube → WAV 변환, 메타데이터 추출 |
-| `analyzer.py` | librosa로 BPM/조성/박자 분석 |
-| `separator.py` | Demucs htdemucs_ft로 베이스 스템 분리 |
-| `transcriber.py` | Basic-Pitch로 베이스 WAV → MIDI 전사 |
-| `chord_detector.py` | 크로마 특성 기반 마디별 코드 감지 |
-| `score_builder.py` | music21로 오선보+TAB 악보 객체 구성 |
-| `pdf_exporter.py` | LilyPond subprocess로 PDF 렌더링 |
-| `pipeline.py` | 모든 모듈을 순서대로 호출하는 오케스트레이터 |
+| `analyzer.py` | librosa로 BPM/조성/박자 분석 + 정속 마디 그리드(`build_measure_grid`, `detect_first_onset`) |
+| `chord_detector.py` | 전체음원 크로마 템플릿 매칭으로 마디당 2개(2박) 코드(루트+품질) 감지 |
+| `roman_numeral.py` | 코드 심볼 → 조표 기준 로마숫자 도수 변환 (music21 `romanNumeralFromChord` 기반) |
+| `score_builder.py` | `build_chord_chart`: 단일 오선보 코드 차트 music21 객체 구성 |
+| `pdf_exporter.py` | LilyPond로 단일 스태프 차트 렌더링 (`_chart_to_ly`) |
+| `pipeline.py` | 차트 파이프라인 오케스트레이터 (분리/전사 단계 없음) |
+| `separator.py` / `transcriber.py` | (v1 전용) Demucs 분리 / Basic-Pitch 전사 — v2 차트 흐름에서는 미사용 |
 
 ---
 

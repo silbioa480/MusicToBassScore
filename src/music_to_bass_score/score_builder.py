@@ -26,6 +26,78 @@ from .transcriber import NoteEvent
 logger = get_logger(__name__)
 
 
+def build_chord_chart(
+    song_metadata: SongMetadata,
+    analysis: AudioAnalysis,
+    chord_labels: list,
+    roman_labels: list,
+    include_tab: bool = False,  # accepted for API symmetry; ignored (chart has no TAB)
+) -> stream.Score:
+    """Build a single-staff chord chart: chord symbols above, roman numerals inside.
+
+    chord_labels and roman_labels are list[list[str]] (per-measure label lists, e.g.
+    two entries per measure for 2-beat resolution). The score carries the labels as
+    TextExpressions distinguished by placement: 'above' = chord symbol, 'below' = roman
+    degree. pdf_exporter renders the actual single-staff chart layout.
+    """
+    logger.info(
+        "Building chord chart: %r by %r, %d measures",
+        song_metadata.title, song_metadata.artist, len(chord_labels),
+    )
+    score = stream.Score()
+
+    md = metadata.Metadata()
+    md.title = song_metadata.title
+    md.composer = song_metadata.artist
+    score.insert(0, md)
+
+    beats_per_measure = analysis.time_signature_num
+
+    part = stream.Part(id="chords")
+    part.partName = "Chord Chart"
+    part.append(clef.TrebleClef())
+
+    root_name, mode = _parse_key_string(analysis.key)
+    part.append(key.Key(root_name, mode))
+    part.append(meter.TimeSignature(
+        f"{analysis.time_signature_num}/{analysis.time_signature_den}"
+    ))
+    part.insert(0, tempo.MetronomeMark(number=analysis.bpm_rounded))
+
+    n_measures = max(len(chord_labels), len(roman_labels), 1)
+    for m_idx in range(n_measures):
+        measure = stream.Measure(number=m_idx + 1)
+
+        chords = _normalize_measure_labels(
+            chord_labels[m_idx] if m_idx < len(chord_labels) else []
+        )
+        romans = _normalize_measure_labels(
+            roman_labels[m_idx] if m_idx < len(roman_labels) else []
+        )
+
+        n = max(len(chords), 1)
+        for j in range(n):
+            off = beats_per_measure * j / n
+            if j < len(chords):
+                te = expressions.TextExpression(chords[j])
+                te.placement = 'above'
+                measure.insert(off, te)
+            if j < len(romans):
+                tr = expressions.TextExpression(romans[j])
+                tr.placement = 'below'
+                measure.insert(off, tr)
+
+        # Invisible whole-measure rest keeps the measure rhythmically valid
+        rest = m21note.Rest(quarterLength=beats_per_measure)
+        rest.style.hideObjectOnPrint = True
+        measure.append(rest)
+
+        part.append(measure)
+
+    score.append(part)
+    return score
+
+
 def build_score(
     song_metadata: SongMetadata,
     analysis: AudioAnalysis,

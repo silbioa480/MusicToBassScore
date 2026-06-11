@@ -13,9 +13,8 @@ from .config import AUDIO_DIR, MIDI_DIR, SAMPLE_RATE, SCORES_DIR, STEMS_DIR
 from .downloader import SongMetadata, download_audio
 from .logger import get_logger
 from .pdf_exporter import ExportResult, export_to_pdf
-from .score_builder import build_score
-from .separator import SeparationResult, separate_bass
-from .transcriber import TranscriptionResult, transcribe_bass
+from .roman_numeral import measures_to_roman
+from .score_builder import build_chord_chart
 
 logger = get_logger(__name__)
 
@@ -24,9 +23,8 @@ logger = get_logger(__name__)
 class PipelineResult:
     metadata: SongMetadata
     analysis: AudioAnalysis
-    separation: SeparationResult
-    transcription: TranscriptionResult
-    chord_labels: list[str]
+    chord_labels: list
+    roman_labels: list
     export: ExportResult
 
 
@@ -143,28 +141,19 @@ def _run_from_metadata(
     cb: Callable,
     start_frac: float,
 ) -> PipelineResult:
-    """Shared pipeline stages: analysis → separation → transcription → score → PDF."""
+    """Shared pipeline stages (chord chart): analysis → chord detect → roman → PDF.
+
+    No source separation or note transcription — the output is a chord-confirmation
+    chart, so the full mix is analyzed directly for chords. This is far faster (no
+    multi-minute Demucs pass).
+    """
 
     cb("음원 분석 중...", start_frac)
     analysis = analyze_audio(song_metadata.audio_path)
 
-    cb("베이스 트랙 분리 중... (시간이 걸립니다)", 0.25)
-    separation = separate_bass(
-        audio_path=song_metadata.audio_path,
-        output_dir=STEMS_DIR,
-        progress_cb=lambda f: cb("베이스 트랙 분리 중...", 0.25 + f * 0.40),
-    )
-
-    cb("음표 인식 중...", 0.65)
-    transcription = transcribe_bass(
-        bass_wav_path=separation.bass_path,
-        output_dir=MIDI_DIR,
-        progress_cb=lambda f: cb("음표 인식 중...", 0.65 + f * 0.15),
-    )
-
-    # Constant-tempo measure grid anchored at the first bass onset (downbeat proxy).
+    # Constant-tempo measure grid anchored at the first onset (downbeat proxy).
     # Avoids the ±15% jitter of librosa beat tracking that drifts measure boundaries.
-    anchor = detect_first_onset(separation.bass_path)
+    anchor = detect_first_onset(song_metadata.audio_path)
     measure_grid = build_measure_grid(
         bpm=analysis.bpm,
         beats_per_measure=analysis.time_signature_num,
@@ -173,22 +162,24 @@ def _run_from_metadata(
     )
     logger.info("Measure grid: anchor=%.3fs, %d measures", anchor, len(measure_grid))
 
-    cb("코드 진행 분석 중...", 0.80)
+    cb("코드 진행 분석 중...", 0.45)
     chord_labels = detect_chords_per_measure(
-        audio_path=separation.bass_path,   # bass stem: far cleaner root detection than full mix
+        audio_path=song_metadata.audio_path,   # full mix: harmony needed for chord quality
         bpm=analysis.bpm,
         time_sig_num=analysis.time_signature_num,
         measure_grid=measure_grid,
     )
 
-    cb("악보 생성 중...", 0.88)
-    score = build_score(
+    cb("도수 분석 중...", 0.70)
+    roman_labels = measures_to_roman(chord_labels, analysis.key)
+    logger.info("Roman degrees (first 6): %s", roman_labels[:6])
+
+    cb("악보 생성 중...", 0.85)
+    score = build_chord_chart(
         song_metadata=song_metadata,
         analysis=analysis,
-        note_events=transcription.note_events,
         chord_labels=chord_labels,
-        include_tab=include_tab,
-        measure_grid=measure_grid,
+        roman_labels=roman_labels,
     )
 
     cb("PDF 렌더링 중...", 0.95)
@@ -209,9 +200,8 @@ def _run_from_metadata(
     return PipelineResult(
         metadata=song_metadata,
         analysis=analysis,
-        separation=separation,
-        transcription=transcription,
         chord_labels=chord_labels,
+        roman_labels=roman_labels,
         export=export,
     )
 

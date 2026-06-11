@@ -201,11 +201,17 @@ if "result" in st.session_state:
             result.chord_labels[i : i + chords_per_row]
             for i in range(0, len(result.chord_labels), chords_per_row)
         ]
+        roman = result.roman_labels or []
         for row_idx, row in enumerate(rows):
             cols = st.columns(len(row))
             for col_idx, (col, chord) in enumerate(zip(cols, row)):
                 measure_num = row_idx * chords_per_row + col_idx + 1
-                col.metric(label=f"마디 {measure_num}", value=chord)
+                m_i = row_idx * chords_per_row + col_idx
+                chord_txt = " ".join(chord) if isinstance(chord, list) else str(chord)
+                deg = roman[m_i] if m_i < len(roman) else ""
+                deg_txt = " ".join(deg) if isinstance(deg, list) else str(deg)
+                col.metric(label=f"마디 {measure_num}", value=chord_txt, delta=deg_txt,
+                           delta_color="off")
 
     st.divider()
     st.markdown("### 📄 악보 다운로드")
@@ -234,12 +240,6 @@ if "result" in st.session_state:
             )
     else:
         st.warning("⚠️ 출력 파일을 찾을 수 없습니다.")
-
-    if result.separation.bass_path.exists():
-        st.divider()
-        st.markdown("### 🎸 분리된 베이스 트랙 미리듣기")
-        with open(result.separation.bass_path, "rb") as f:
-            st.audio(f.read(), format="audio/wav")
 
 elif not youtube_btn and not file_btn:
     st.info("👆 YouTube URL을 입력하거나 음원 파일을 업로드하고 '악보 생성' 버튼을 눌러주세요.")

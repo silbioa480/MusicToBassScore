@@ -345,6 +345,141 @@ tabNotes = {{
 '''
 
 
+# ── Chord-chart builder (single staff: chord above, roman degree large inside) ──
+
+def _spacer_ly(ql: float) -> str:
+    """LilyPond invisible spacer token(s) for a duration of `ql` quarter beats."""
+    return ' '.join(f"s{d}" for d in _split_ql(ql))
+
+
+def _chart_measure_ly(measure, beats: int) -> str:
+    """Render one chord-chart measure: invisible spacers carrying chord/roman markups."""
+    # Collect markups by offset: 'above' = chord symbol, 'below' = roman degree
+    above: dict[float, str] = {}
+    below: dict[float, str] = {}
+    for te in measure.getElementsByClass('TextExpression'):
+        off = _q(float(te.offset))
+        place = getattr(te, 'placement', 'above') or 'above'
+        (below if place == 'below' else above)[off] = te.content
+
+    # Segment boundaries = sorted unique offsets where a chord starts
+    starts = sorted(set(above.keys()) | {0.0})
+    beats_f = float(beats)
+    tokens: list[str] = []
+
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else beats_f
+        dur = _q(end - start)
+        if dur < 0.125:
+            continue
+        spacers = _split_ql(dur)
+        # Attach markups to the first spacer of the segment
+        chord = above.get(start)
+        roman = below.get(start)
+        for j, d in enumerate(spacers):
+            tok = f"s{d}"
+            if j == 0:
+                if chord:
+                    tok += f'^\\markup{{\\bold "{_esc(chord)}"}}'
+                if roman:
+                    tok += f'_\\markup{{\\large \\bold "{_esc(roman)}"}}'
+            tokens.append(tok)
+
+    if not tokens:
+        tokens = [_spacer_ly(beats_f)]
+    return ' '.join(tokens) + ' |'
+
+
+def _chart_to_ly(score: stream.Score, stem: str) -> str:
+    """Build a single-staff chord-chart LilyPond source from a music21 Score."""
+    part = next((p for p in score.parts if p.id == "chords"), score.parts[0])
+
+    md = score.metadata
+    title    = _esc((md.title    if md and md.title    else stem) or stem)
+    composer = _esc((md.composer if md and md.composer else "")   or "")
+
+    flat = part.flatten()
+    from music21 import key as m21key, tempo as m21tempo
+
+    key_objs = list(flat.getElementsByClass(m21key.Key)) or list(flat.getElementsByClass(m21key.KeySignature))
+    if key_objs:
+        ks = key_objs[0]
+        tonic = ks.tonic.name.replace('#', 's').replace('-', 'f').lower()
+        mode  = getattr(ks, 'mode', 'major') or 'major'
+        key_lily = f"\\key {tonic} \\{mode}"
+        key_name = f"{ks.tonic.name} {mode}"
+    else:
+        key_lily, key_name = "\\key c \\major", "C major"
+
+    time_sigs = list(flat.getElementsByClass('TimeSignature'))
+    if time_sigs:
+        ts = time_sigs[0]
+        beats = ts.numerator
+        time_lily = f"\\time {ts.numerator}/{ts.denominator}"
+    else:
+        beats, time_lily = 4, "\\time 4/4"
+
+    mm = list(flat.getElementsByClass(m21tempo.MetronomeMark))
+    bpm = int(round(mm[0].number)) if mm else 120
+
+    MEASURES_PER_LINE = 4
+    lines: list[str] = []
+    for i, measure in enumerate(part.getElementsByClass('Measure')):
+        lines.append(f"  {_chart_measure_ly(measure, beats)}  % m{i+1}")
+        if (i + 1) % MEASURES_PER_LINE == 0:
+            lines.append("  \\break")
+    chart_block = "\n".join(lines)
+
+    subtitle = _esc(f"Key: {key_name}   |   {beats}/4   |   ♩ = {bpm}")
+
+    return f'''\\version "2.24.0"
+\\language "english"
+
+\\header {{
+  title = "{title}"
+  composer = "{composer}"
+  subtitle = "{subtitle}"
+  tagline = ##f
+}}
+
+\\paper {{
+  #(set-paper-size "a4")
+  indent = 0\\mm
+  ragged-last = ##t
+  ragged-last-bottom = ##f
+  system-system-distance = #'((basic-distance . 18) (minimum-distance . 14) (stretchability . 8))
+}}
+
+global = {{
+  {key_lily}
+  {time_lily}
+}}
+
+chartNotes = {{
+  \\clef treble
+  \\tempo 4 = {bpm}
+{chart_block}
+}}
+
+\\score {{
+  \\new Staff \\with {{
+    \\override TimeSignature.stencil = ##f
+  }} {{
+    \\global
+    \\override Staff.Clef.stencil = ##f
+    \\chartNotes
+  }}
+  \\layout {{
+    \\context {{
+      \\Score
+      \\override SpacingSpanner.uniform-stretching = ##t
+      proportionalNotationDuration = #(ly:make-moment 1/8)
+    }}
+  }}
+}}
+'''
+
+
 # ── Export functions ──────────────────────────────────────────────────────────
 
 def _export_via_lilypond(
@@ -355,7 +490,8 @@ def _export_via_lilypond(
     ly_path  = output_dir / f"{filename_stem}.ly"
     pdf_path = output_dir / f"{filename_stem}.pdf"
 
-    ly_content = _score_to_ly(score, filename_stem)
+    is_chart = any(p.id == "chords" for p in score.parts)
+    ly_content = _chart_to_ly(score, filename_stem) if is_chart else _score_to_ly(score, filename_stem)
     ly_path.write_text(ly_content, encoding='utf-8')
     logger.debug("LilyPond source written: %s (%d bytes)", ly_path, len(ly_content))
 

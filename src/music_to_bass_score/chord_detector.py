@@ -1,10 +1,9 @@
-"""Per-measure chord detection using librosa chroma features.
+"""Per-measure chord detection using librosa chroma features (full-mix based).
 
-Detects the bass ROOT per half-measure (2-beat resolution) from the separated bass
-stem. Bass is essentially monophonic, so chord *quality* (maj/min/7) cannot be
-reliably inferred from it — the root is the reliable, useful signal for a bassist.
-Returns two labels per measure (first half, second half) to capture fast harmonic
-rhythm that full-measure averaging would blur together.
+Detects chord SYMBOLS (root + quality) per half-measure (2-beat resolution) from the
+FULL mix — the full mix contains the harmony instruments needed to determine chord
+quality (major/minor/7th), which a monophonic bass line cannot provide. Returns two
+chord symbols per measure to capture fast harmonic rhythm.
 """
 
 from pathlib import Path
@@ -20,25 +19,48 @@ logger = get_logger(__name__)
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
+# (intervals, symbol-suffix) — symbol suffix is appended to the root name
+_CHORD_QUALITIES = [
+    ([0, 4, 7], ""),        # major triad     → C
+    ([0, 3, 7], "m"),       # minor triad     → Cm
+    ([0, 4, 7, 10], "7"),   # dominant 7th    → C7
+    ([0, 3, 7, 10], "m7"),  # minor 7th       → Cm7
+    ([0, 4, 7, 11], "maj7"),# major 7th       → Cmaj7
+    ([0, 3, 6], "dim"),     # diminished      → Cdim
+]
+
+
+def _build_templates() -> dict[str, np.ndarray]:
+    templates = {}
+    for root in range(12):
+        name = _NOTE_NAMES[root]
+        for intervals, suffix in _CHORD_QUALITIES:
+            vec = np.zeros(12)
+            for interval in intervals:
+                vec[(root + interval) % 12] = 1.0
+            vec /= np.linalg.norm(vec)
+            templates[f"{name}{suffix}"] = vec
+    return templates
+
+
+_CHORD_TEMPLATES = _build_templates()
+
 
 def detect_chords_per_measure(
     audio_path: Path,
     bpm: float,
     time_sig_num: int,
-    beat_times: Optional[list[float]] = None,
     measure_grid: Optional[list[float]] = None,
     sample_rate: int = SAMPLE_RATE,
 ) -> list[list[str]]:
-    """Detect chord-root labels for each measure (two per measure: halves).
+    """Detect chord symbols for each measure (two per measure: halves).
 
-    Returns a list (one entry per measure) of label lists. With a 4/4 measure the
-    inner list has 2 entries — the root over beats 1-2 and over beats 3-4.
-
-    When measure_grid (constant-tempo measure-start times) is provided, segmentation
-    uses it for stable, jitter-free boundaries. Otherwise falls back to fixed-BPM frames.
+    Returns a list (one per measure) of label lists. In 4/4 each inner list has 2
+    entries — the chord over beats 1-2 and over beats 3-4. `audio_path` should be the
+    FULL mix (harmony needed for chord quality).
     """
     logger.info(
-        "Detecting chords (2/measure): %s (bpm=%.1f time_sig=%d/4 grid=%s)",
+        "Detecting chords (full-mix, 2/measure): %s (bpm=%.1f time_sig=%d/4 grid=%s)",
         audio_path, bpm, time_sig_num,
         f"{len(measure_grid)} measures" if measure_grid else "none",
     )
@@ -51,20 +73,28 @@ def detect_chords_per_measure(
         logger.warning("measure_grid unavailable, falling back to fixed-BPM segmentation")
         labels = _chords_from_fixed_bpm(chroma, bpm, time_sig_num, sr)
 
-    flat_preview = [f"{m[0]}-{m[1]}" if len(m) == 2 else "/".join(m) for m in labels[:6]]
-    logger.info("Chord detection complete: %d measures — %s", len(labels), flat_preview)
+    preview = [f"{m[0]}-{m[1]}" if len(m) == 2 else "/".join(m) for m in labels[:6]]
+    logger.info("Chord detection complete: %d measures — %s", len(labels), preview)
     return labels
 
 
-def _root_of_segment(chroma: np.ndarray, start_frame: int, end_frame: int) -> str:
-    """Return the dominant pitch-class name (bass root) over a frame range."""
+def _match_chord(chroma: np.ndarray, start_frame: int, end_frame: int) -> str:
+    """Template-match the mean chroma over a frame range to the nearest chord symbol."""
     end_frame = max(start_frame + 1, min(end_frame, chroma.shape[1]))
     if start_frame >= chroma.shape[1]:
         return "N.C."
     seg = chroma[:, start_frame:end_frame].mean(axis=1)
-    if np.linalg.norm(seg) < 1e-6:
+    norm = np.linalg.norm(seg)
+    if norm < 1e-6:
         return "N.C."
-    return _NOTE_NAMES[int(np.argmax(seg))]
+    seg = seg / norm
+
+    best_name, best_score = "N.C.", -np.inf
+    for name, template in _CHORD_TEMPLATES.items():
+        score = float(np.dot(seg, template))
+        if score > best_score:
+            best_score, best_name = score, name
+    return best_name
 
 
 def _chords_from_grid(
@@ -74,7 +104,7 @@ def _chords_from_grid(
     bpm: float,
     sr: int,
 ) -> list[list[str]]:
-    """Detect two roots per measure using constant-tempo measure boundaries."""
+    """Detect two chords per measure using constant-tempo measure boundaries."""
     seconds_per_measure = (60.0 / bpm) * time_sig_num
     half = seconds_per_measure / 2.0
     labels: list[list[str]] = []
@@ -87,9 +117,7 @@ def _chords_from_grid(
         mf = librosa.time_to_frames(mid, sr=sr, hop_length=HOP_LENGTH)
         ef = librosa.time_to_frames(m_end, sr=sr, hop_length=HOP_LENGTH)
 
-        first = _root_of_segment(chroma, sf1, mf)
-        second = _root_of_segment(chroma, mf, ef)
-        labels.append([first, second])
+        labels.append([_match_chord(chroma, sf1, mf), _match_chord(chroma, mf, ef)])
 
     return labels
 
@@ -112,9 +140,7 @@ def _chords_from_fixed_bpm(
         s1 = int(pos)
         s2 = int(pos + half_frames)
         s3 = int(pos + 2 * half_frames)
-        first = _root_of_segment(chroma, s1, s2)
-        second = _root_of_segment(chroma, s2, s3)
-        labels.append([first, second])
+        labels.append([_match_chord(chroma, s1, s2), _match_chord(chroma, s2, s3)])
         pos += 2 * half_frames
 
     return labels
