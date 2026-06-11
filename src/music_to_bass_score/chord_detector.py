@@ -52,15 +52,17 @@ def detect_chords_per_measure(
     time_sig_num: int,
     measure_grid: Optional[list[float]] = None,
     sample_rate: int = SAMPLE_RATE,
-) -> list[list[str]]:
-    """Detect chord symbols for each measure (two per measure: halves).
+) -> list[list[tuple[float, str]]]:
+    """Detect chord changes per measure at beat resolution.
 
-    Returns a list (one per measure) of label lists. In 4/4 each inner list has 2
-    entries — the chord over beats 1-2 and over beats 3-4. `audio_path` should be the
-    FULL mix (harmony needed for chord quality).
+    Returns a list (one entry per measure) of (beat_offset, chord_symbol) tuples.
+    Each measure is analyzed beat-by-beat, then consecutive identical chords are
+    collapsed — so a measure with one chord yields one entry, and a measure where the
+    chord changes N times yields N entries at their respective beat offsets.
+    `audio_path` should be the FULL mix (harmony needed for chord quality).
     """
     logger.info(
-        "Detecting chords (full-mix, 2/measure): %s (bpm=%.1f time_sig=%d/4 grid=%s)",
+        "Detecting chords (full-mix, per-beat+collapse): %s (bpm=%.1f time_sig=%d/4 grid=%s)",
         audio_path, bpm, time_sig_num,
         f"{len(measure_grid)} measures" if measure_grid else "none",
     )
@@ -68,14 +70,14 @@ def detect_chords_per_measure(
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=HOP_LENGTH)
 
     if measure_grid and len(measure_grid) >= 1:
-        labels = _chords_from_grid(chroma, measure_grid, time_sig_num, bpm, sr)
+        measures = _chords_from_grid(chroma, measure_grid, time_sig_num, bpm, sr)
     else:
         logger.warning("measure_grid unavailable, falling back to fixed-BPM segmentation")
-        labels = _chords_from_fixed_bpm(chroma, bpm, time_sig_num, sr)
+        measures = _chords_from_fixed_bpm(chroma, bpm, time_sig_num, sr)
 
-    preview = [f"{m[0]}-{m[1]}" if len(m) == 2 else "/".join(m) for m in labels[:6]]
-    logger.info("Chord detection complete: %d measures — %s", len(labels), preview)
-    return labels
+    preview = ["|".join(s for _, s in m) for m in measures[:6]]
+    logger.info("Chord detection complete: %d measures — %s", len(measures), preview)
+    return measures
 
 
 def _match_chord(chroma: np.ndarray, start_frame: int, end_frame: int) -> str:
@@ -97,29 +99,54 @@ def _match_chord(chroma: np.ndarray, start_frame: int, end_frame: int) -> str:
     return best_name
 
 
+# Half-measure (2-segment) resolution: smoother/more reliable than per-beat template
+# matching, which jitters every beat. Each measure yields its two half-measure chords,
+# then identical halves collapse to one — so a steady measure shows one chord and a
+# changing measure shows two, at the beat offsets where the change occurs.
+_SEGMENTS_PER_MEASURE = 2
+
+
+def _measure_segments(time_sig_num: int) -> list[tuple[float, float]]:
+    """Return (start_fraction, end_fraction) of each detection segment within a measure."""
+    n = _SEGMENTS_PER_MEASURE
+    return [(i / n, (i + 1) / n) for i in range(n)]
+
+
+def _collapse_segments(seg_chords: list[tuple[float, str]]) -> list[tuple[float, str]]:
+    """Collapse consecutive identical (offset, chord) segments, keeping first offset."""
+    result: list[tuple[float, str]] = []
+    prev = None
+    for off, chord in seg_chords:
+        if chord != prev:
+            result.append((off, chord))
+            prev = chord
+    return result or [(0.0, "N.C.")]
+
+
 def _chords_from_grid(
     chroma: np.ndarray,
     measure_grid: list[float],
     time_sig_num: int,
     bpm: float,
     sr: int,
-) -> list[list[str]]:
-    """Detect two chords per measure using constant-tempo measure boundaries."""
+) -> list[list[tuple[float, str]]]:
+    """Half-measure detection on the constant-tempo grid, identical segments collapsed."""
     seconds_per_measure = (60.0 / bpm) * time_sig_num
-    half = seconds_per_measure / 2.0
-    labels: list[list[str]] = []
+    segs = _measure_segments(time_sig_num)
+    measures: list[list[tuple[float, str]]] = []
 
     for m_start in measure_grid:
-        mid = m_start + half
-        m_end = m_start + seconds_per_measure
+        seg_chords = []
+        for s_frac, e_frac in segs:
+            bs = m_start + s_frac * seconds_per_measure
+            be = m_start + e_frac * seconds_per_measure
+            sfb = librosa.time_to_frames(bs, sr=sr, hop_length=HOP_LENGTH)
+            efb = librosa.time_to_frames(be, sr=sr, hop_length=HOP_LENGTH)
+            beat_offset = s_frac * time_sig_num
+            seg_chords.append((beat_offset, _match_chord(chroma, sfb, efb)))
+        measures.append(_collapse_segments(seg_chords))
 
-        sf1 = librosa.time_to_frames(m_start, sr=sr, hop_length=HOP_LENGTH)
-        mf = librosa.time_to_frames(mid, sr=sr, hop_length=HOP_LENGTH)
-        ef = librosa.time_to_frames(m_end, sr=sr, hop_length=HOP_LENGTH)
-
-        labels.append([_match_chord(chroma, sf1, mf), _match_chord(chroma, mf, ef)])
-
-    return labels
+    return measures
 
 
 def _chords_from_fixed_bpm(
@@ -127,20 +154,23 @@ def _chords_from_fixed_bpm(
     bpm: float,
     time_sig_num: int,
     sr: int,
-) -> list[list[str]]:
-    """Fallback: fixed-BPM half-measure segmentation starting at frame 0."""
-    beat_period_frames = (60.0 / bpm) * (sr / HOP_LENGTH)
-    half_frames = beat_period_frames * (time_sig_num / 2.0)
+) -> list[list[tuple[float, str]]]:
+    """Fallback: fixed-BPM half-measure segmentation from frame 0, identical collapsed."""
+    beat_frames = (60.0 / bpm) * (sr / HOP_LENGTH)
+    measure_frames = beat_frames * time_sig_num
+    segs = _measure_segments(time_sig_num)
 
     n_frames = chroma.shape[1]
-    labels: list[list[str]] = []
+    measures: list[list[tuple[float, str]]] = []
     pos = 0.0
 
     while pos < n_frames:
-        s1 = int(pos)
-        s2 = int(pos + half_frames)
-        s3 = int(pos + 2 * half_frames)
-        labels.append([_match_chord(chroma, s1, s2), _match_chord(chroma, s2, s3)])
-        pos += 2 * half_frames
+        seg_chords = []
+        for s_frac, e_frac in segs:
+            s = int(pos + s_frac * measure_frames)
+            e = int(pos + e_frac * measure_frames)
+            seg_chords.append((s_frac * time_sig_num, _match_chord(chroma, s, e)))
+        measures.append(_collapse_segments(seg_chords))
+        pos += measure_frames
 
-    return labels
+    return measures

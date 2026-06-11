@@ -345,53 +345,50 @@ tabNotes = {{
 '''
 
 
-# ── Chord-chart builder (single staff: chord above, roman degree large inside) ──
+# ── Chord-chart builder (box grid: no staff; chord above box, degree inside box) ──
 
-def _spacer_ly(ql: float) -> str:
-    """LilyPond invisible spacer token(s) for a duration of `ql` quarter beats."""
-    return ' '.join(f"s{d}" for d in _split_ql(ql))
+_MEASURES_PER_LINE = 4
+_CELL_WIDTH = 27        # markup units per measure cell (fixed for even grid)
 
 
-def _chart_measure_ly(measure, beats: int) -> str:
-    """Render one chord-chart measure: invisible spacers carrying chord/roman markups."""
-    # Collect markups by offset: 'above' = chord symbol, 'below' = roman degree
-    above: dict[float, str] = {}
+def _measure_cell_ly(measure) -> str:
+    """Build a LilyPond markup cell for one measure: chord names above a boxed degree row.
+
+    Repeated chords are already collapsed upstream, so each measure carries only its
+    actual chord changes (1..N), placed left→right in the cell.
+    """
+    above: list[tuple[float, str]] = []
     below: dict[float, str] = {}
     for te in measure.getElementsByClass('TextExpression'):
         off = _q(float(te.offset))
         place = getattr(te, 'placement', 'above') or 'above'
-        (below if place == 'below' else above)[off] = te.content
+        if place == 'below':
+            below[off] = te.content
+        else:
+            above.append((off, te.content))
+    above.sort(key=lambda x: x[0])
 
-    # Segment boundaries = sorted unique offsets where a chord starts
-    starts = sorted(set(above.keys()) | {0.0})
-    beats_f = float(beats)
-    tokens: list[str] = []
+    if not above:
+        chords_md = '\\transparent "x"'
+        degrees_md = '\\transparent "x"'
+    else:
+        chord_items = '  '.join(f'"{_esc(sym)}"' for _, sym in above)
+        deg_items = '  '.join(f'\\bold "{_esc(below.get(off, ""))}"' for off, _ in above)
+        chords_md = f'\\line {{ {chord_items} }}'
+        degrees_md = f'\\line {{ {deg_items} }}'
 
-    for i, start in enumerate(starts):
-        end = starts[i + 1] if i + 1 < len(starts) else beats_f
-        dur = _q(end - start)
-        if dur < 0.125:
-            continue
-        spacers = _split_ql(dur)
-        # Attach markups to the first spacer of the segment
-        chord = above.get(start)
-        roman = below.get(start)
-        for j, d in enumerate(spacers):
-            tok = f"s{d}"
-            if j == 0:
-                if chord:
-                    tok += f'^\\markup{{\\bold "{_esc(chord)}"}}'
-                if roman:
-                    tok += f'_\\markup{{\\large \\bold "{_esc(roman)}"}}'
-            tokens.append(tok)
-
-    if not tokens:
-        tokens = [_spacer_ly(beats_f)]
-    return ' '.join(tokens) + ' |'
+    # Fixed-width centered cell: chord row above, a degree box that hugs its content
+    # (variable width, with padding) so long degrees like "#IVmaj7 IVmaj7" never clip.
+    return (
+        f'\\hcenter-in #{_CELL_WIDTH} \\center-column {{ '
+        f'{chords_md} '
+        f'\\rounded-box \\pad-x #0.8 \\large {degrees_md} '
+        f'}}'
+    )
 
 
 def _chart_to_ly(score: stream.Score, stem: str) -> str:
-    """Build a single-staff chord-chart LilyPond source from a music21 Score."""
+    """Build a box-grid chord-chart LilyPond source (markup only — no staff)."""
     part = next((p for p in score.parts if p.id == "chords"), score.parts[0])
 
     md = score.metadata
@@ -404,33 +401,30 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
     key_objs = list(flat.getElementsByClass(m21key.Key)) or list(flat.getElementsByClass(m21key.KeySignature))
     if key_objs:
         ks = key_objs[0]
-        tonic = ks.tonic.name.replace('#', 's').replace('-', 'f').lower()
-        mode  = getattr(ks, 'mode', 'major') or 'major'
-        key_lily = f"\\key {tonic} \\{mode}"
+        mode = getattr(ks, 'mode', 'major') or 'major'
         key_name = f"{ks.tonic.name} {mode}"
     else:
-        key_lily, key_name = "\\key c \\major", "C major"
+        key_name = "C major"
 
     time_sigs = list(flat.getElementsByClass('TimeSignature'))
-    if time_sigs:
-        ts = time_sigs[0]
-        beats = ts.numerator
-        time_lily = f"\\time {ts.numerator}/{ts.denominator}"
-    else:
-        beats, time_lily = 4, "\\time 4/4"
+    beats = time_sigs[0].numerator if time_sigs else 4
+    denom = time_sigs[0].denominator if time_sigs else 4
 
     mm = list(flat.getElementsByClass(m21tempo.MetronomeMark))
     bpm = int(round(mm[0].number)) if mm else 120
 
-    MEASURES_PER_LINE = 4
-    lines: list[str] = []
-    for i, measure in enumerate(part.getElementsByClass('Measure')):
-        lines.append(f"  {_chart_measure_ly(measure, beats)}  % m{i+1}")
-        if (i + 1) % MEASURES_PER_LINE == 0:
-            lines.append("  \\break")
-    chart_block = "\n".join(lines)
+    measures = list(part.getElementsByClass('Measure'))
+    cells = [_measure_cell_ly(m) for m in measures]
 
-    subtitle = _esc(f"Key: {key_name}   |   {beats}/4   |   ♩ = {bpm}")
+    # One top-level \markup block per row → LilyPond paginates between blocks.
+    rows: list[str] = []
+    for i in range(0, len(cells), _MEASURES_PER_LINE):
+        row_cells = cells[i:i + _MEASURES_PER_LINE]
+        joined = ' '.join(row_cells)
+        rows.append(f'\\markup \\vspace #0.6\n\\markup \\line {{ \\hspace #5 {joined} }}')
+    body = "\n".join(rows)
+
+    subtitle = _esc(f"Key: {key_name}   |   {beats}/{denom}   |   tempo {bpm}")
 
     return f'''\\version "2.24.0"
 \\language "english"
@@ -444,39 +438,12 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
 
 \\paper {{
   #(set-paper-size "a4")
-  indent = 0\\mm
-  ragged-last = ##t
-  ragged-last-bottom = ##f
-  system-system-distance = #'((basic-distance . 18) (minimum-distance . 14) (stretchability . 8))
+  top-margin = 15\\mm
+  left-margin = 12\\mm
+  right-margin = 12\\mm
 }}
 
-global = {{
-  {key_lily}
-  {time_lily}
-}}
-
-chartNotes = {{
-  \\clef treble
-  \\tempo 4 = {bpm}
-{chart_block}
-}}
-
-\\score {{
-  \\new Staff \\with {{
-    \\override TimeSignature.stencil = ##f
-  }} {{
-    \\global
-    \\override Staff.Clef.stencil = ##f
-    \\chartNotes
-  }}
-  \\layout {{
-    \\context {{
-      \\Score
-      \\override SpacingSpanner.uniform-stretching = ##t
-      proportionalNotationDuration = #(ly:make-moment 1/8)
-    }}
-  }}
-}}
+{body}
 '''
 
 

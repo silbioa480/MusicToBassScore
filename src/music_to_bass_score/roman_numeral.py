@@ -68,12 +68,12 @@ def chord_to_roman(symbol: str, key_str: str) -> str:
         return symbol
 
 
-def measures_to_roman(chord_labels: list, key_str: str) -> list:
-    """Convert a list[list[str]] of chord symbols to the same shape of roman degrees."""
+def measures_to_roman(chord_measures: list, key_str: str) -> list:
+    """Convert per-measure (offset, chord) tuples to (offset, roman) tuples.
+
+    Input/output shape: list[list[tuple[float, str]]].
+    """
     result = []
-    for measure in chord_labels:
-        if isinstance(measure, str):
-            result.append(chord_to_roman(measure, key_str))
-        else:
-            result.append([chord_to_roman(c, key_str) for c in measure])
+    for measure in chord_measures:
+        result.append([(off, chord_to_roman(sym, key_str)) for off, sym in measure])
     return result

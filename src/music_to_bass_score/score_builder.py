@@ -33,12 +33,12 @@ def build_chord_chart(
     roman_labels: list,
     include_tab: bool = False,  # accepted for API symmetry; ignored (chart has no TAB)
 ) -> stream.Score:
-    """Build a single-staff chord chart: chord symbols above, roman numerals inside.
+    """Build a chord chart carrier score: chord symbols + roman degrees per measure.
 
-    chord_labels and roman_labels are list[list[str]] (per-measure label lists, e.g.
-    two entries per measure for 2-beat resolution). The score carries the labels as
+    chord_labels / roman_labels are list[list[tuple[float, str]]] — per measure, a list
+    of (beat_offset, label) at the chord-change points. Labels are carried as
     TextExpressions distinguished by placement: 'above' = chord symbol, 'below' = roman
-    degree. pdf_exporter renders the actual single-staff chart layout.
+    degree. pdf_exporter renders the box-grid layout.
     """
     logger.info(
         "Building chord chart: %r by %r, %d measures",
@@ -68,24 +68,17 @@ def build_chord_chart(
     for m_idx in range(n_measures):
         measure = stream.Measure(number=m_idx + 1)
 
-        chords = _normalize_measure_labels(
-            chord_labels[m_idx] if m_idx < len(chord_labels) else []
-        )
-        romans = _normalize_measure_labels(
-            roman_labels[m_idx] if m_idx < len(roman_labels) else []
-        )
+        chords = chord_labels[m_idx] if m_idx < len(chord_labels) else []
+        romans = roman_labels[m_idx] if m_idx < len(roman_labels) else []
 
-        n = max(len(chords), 1)
-        for j in range(n):
-            off = beats_per_measure * j / n
-            if j < len(chords):
-                te = expressions.TextExpression(chords[j])
-                te.placement = 'above'
-                measure.insert(off, te)
-            if j < len(romans):
-                tr = expressions.TextExpression(romans[j])
-                tr.placement = 'below'
-                measure.insert(off, tr)
+        for off, sym in chords:
+            te = expressions.TextExpression(sym)
+            te.placement = 'above'
+            measure.insert(float(off), te)
+        for off, deg in romans:
+            tr = expressions.TextExpression(deg)
+            tr.placement = 'below'
+            measure.insert(float(off), tr)
 
         # Invisible whole-measure rest keeps the measure rhythmically valid
         rest = m21note.Rest(quarterLength=beats_per_measure)

@@ -202,16 +202,24 @@ if "result" in st.session_state:
             for i in range(0, len(result.chord_labels), chords_per_row)
         ]
         roman = result.roman_labels or []
+
+        def _join(measure):
+            # measure is list[(offset, label)] | list[str] | str
+            if isinstance(measure, str):
+                return measure
+            out = []
+            for item in measure:
+                out.append(item[1] if isinstance(item, (list, tuple)) else str(item))
+            return " ".join(out)
+
         for row_idx, row in enumerate(rows):
             cols = st.columns(len(row))
             for col_idx, (col, chord) in enumerate(zip(cols, row)):
                 measure_num = row_idx * chords_per_row + col_idx + 1
                 m_i = row_idx * chords_per_row + col_idx
-                chord_txt = " ".join(chord) if isinstance(chord, list) else str(chord)
                 deg = roman[m_i] if m_i < len(roman) else ""
-                deg_txt = " ".join(deg) if isinstance(deg, list) else str(deg)
-                col.metric(label=f"마디 {measure_num}", value=chord_txt, delta=deg_txt,
-                           delta_color="off")
+                col.metric(label=f"마디 {measure_num}", value=_join(chord),
+                           delta=_join(deg), delta_color="off")
 
     st.divider()
     st.markdown("### 📄 악보 다운로드")
