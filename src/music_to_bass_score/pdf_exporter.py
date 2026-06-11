@@ -127,8 +127,16 @@ def _esc(s: str) -> str:
 
 # ── Measure renderer ──────────────────────────────────────────────────────────
 
+# Round to nearest 32nd note (0.125 quarter beats)
+def _q(x: float) -> float:
+    return round(x * 8) / 8
+
+
 def _measure_to_ly(measure, beats: int, chord_label: Optional[str]) -> str:
-    """Render a music21 Measure as a LilyPond measure string (ending with |)."""
+    """Render a music21 Measure as a LilyPond measure string of EXACTLY `beats` quarter beats.
+
+    Uses 32nd-note resolution throughout so the bar check | never overflows.
+    """
     from music21 import note as m21note
 
     markup = ''
@@ -136,32 +144,45 @@ def _measure_to_ly(measure, beats: int, chord_label: Optional[str]) -> str:
         markup = f'^\\markup{{\\bold "{_esc(chord_label)}"}}'
 
     tokens: list[str] = []
-    cur = 0.0
+    cur = 0.0          # current time cursor in quarter beats (32nd-note grid)
     chord_placed = False
+    beats_f = float(beats)
 
     elems = sorted(measure.notesAndRests, key=lambda e: float(e.offset))
 
     for elem in elems:
-        off = round(float(elem.offset) * 32) / 32
+        off = _q(float(elem.offset))
 
-        if off < cur - 0.02:
-            continue  # overlapping note — skip
+        # Note starts at or past the end of the measure — stop
+        if off >= beats_f - 0.01:
+            break
 
-        # Fill gap before this element
-        gap = round((off - cur) * 32) / 32
-        if gap > 0.1:
+        # Note starts before cursor (overlap) — skip
+        if off < cur - 0.01:
+            continue
+
+        # Fill gap before this element with a rest
+        gap = _q(off - cur)
+        if gap >= 0.125:
             mk = ''
             if not chord_placed and markup:
                 mk = markup
                 chord_placed = True
             tokens.append(_rest_ly(gap, mk))
+            cur = _q(cur + gap)
 
-        cur = off
+        # Snap cursor to the note's quantised start
+        cur = max(cur, off)
 
-        # Truncate note at measure boundary
-        avail = round((beats - off) * 32) / 32
-        ql = round(min(float(elem.quarterLength), max(0.125, avail)) * 32) / 32
-        ql = max(0.125, ql)
+        # Available space from cursor to end of measure
+        avail = _q(beats_f - cur)
+        if avail < 0.125:
+            break  # Less than a 32nd note left — measure is full
+
+        # Clip note duration to available space (NO max(0.125, ...) — that causes overflow)
+        ql = _q(min(float(elem.quarterLength), avail))
+        if ql < 0.125:
+            break  # Duration rounds to zero — stop
 
         mk = ''
         if not chord_placed and markup:
@@ -173,11 +194,14 @@ def _measure_to_ly(measure, beats: int, chord_label: Optional[str]) -> str:
         else:
             tokens.append(_rest_ly(ql, mk))
 
-        cur = round((off + ql) * 32) / 32
+        cur = _q(cur + ql)
 
-    # Fill remaining tail
-    tail = round((beats - cur) * 32) / 32
-    if tail > 0.1:
+        if cur >= beats_f - 0.01:
+            break  # Measure exactly full
+
+    # Fill remaining space to reach EXACTLY `beats` quarter beats
+    tail = _q(beats_f - cur)
+    if tail >= 0.125:
         mk = ''
         if not chord_placed and markup:
             mk = markup
