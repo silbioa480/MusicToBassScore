@@ -367,16 +367,17 @@ def _combine_markups(parts: list[str]) -> str:
 def _positioned_cell(items: list[tuple[float, str]], beats: int) -> str:
     """Lay chords/degrees inside a fixed-width cell at their beat positions.
 
-    A single chord is centred. With multiple chords each is left-anchored at its beat
-    fraction (offset/beats × cell width) — so the first chord starts at the cell's left
-    edge and a second chord at beat (beats/2) begins at the cell's centre. `items` are
-    already-wrapped markup strings (e.g. '"Em7"' or '\\bold "vi7"').
+    Each chord is left-anchored at its beat fraction (offset/beats × cell width) —
+    so a single chord starts at the cell's left edge, a second chord at beat (beats/2)
+    begins at the cell's centre. `items` are already-wrapped markup strings
+    (e.g. '"Em7"' or '\\bold "vi7"').
     """
     w = _CELL_WIDTH
     if not items:
         return f'\\hcenter-in #{w} \\transparent "x"'
     if len(items) == 1:
-        return f'\\hcenter-in #{w} {items[0][1]}'
+        parts = [f'\\hspace #{w}', f"\\translate #'(0.00 . 0) {items[0][1]}"]
+        return _combine_markups(parts)
     # Strut sets the cell width; each item is translated to its beat-fraction x.
     parts = [f'\\hspace #{w}']
     for off, markup in items:
