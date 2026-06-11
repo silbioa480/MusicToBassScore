@@ -345,17 +345,18 @@ tabNotes = {{
 '''
 
 
-# ── Chord-chart builder (box grid: no staff; chord above box, degree inside box) ──
+# ── Chord-chart builder (banded row box: one box per row, measures split by bars) ──
 
 _MEASURES_PER_LINE = 4
-_CELL_WIDTH = 27        # markup units per measure cell (fixed for even grid)
+_CELL_WIDTH = 26        # markup units per measure cell (fixed for an even grid)
+_BAR_HEIGHT = 2.6       # height of the measure-divider vertical line (staff-spaces)
 
 
-def _measure_cell_ly(measure) -> str:
-    """Build a LilyPond markup cell for one measure: chord names above a boxed degree row.
+def _measure_cell_parts(measure) -> tuple[str, str]:
+    """Return (chord_markup, degree_markup) for one measure, each a fixed-width cell.
 
     Repeated chords are already collapsed upstream, so each measure carries only its
-    actual chord changes (1..N), placed left→right in the cell.
+    actual chord changes (1..N), laid left→right inside the cell.
     """
     above: list[tuple[float, str]] = []
     below: dict[float, str] = {}
@@ -369,22 +370,17 @@ def _measure_cell_ly(measure) -> str:
     above.sort(key=lambda x: x[0])
 
     if not above:
-        chords_md = '\\transparent "x"'
-        degrees_md = '\\transparent "x"'
+        chord_inner = '\\transparent "x"'
+        deg_inner = '\\transparent "x"'
     else:
-        chord_items = '  '.join(f'"{_esc(sym)}"' for _, sym in above)
-        deg_items = '  '.join(f'\\bold "{_esc(below.get(off, ""))}"' for off, _ in above)
-        chords_md = f'\\line {{ {chord_items} }}'
-        degrees_md = f'\\line {{ {deg_items} }}'
+        chord_inner = '\\line { ' + '  '.join(f'"{_esc(sym)}"' for _, sym in above) + ' }'
+        deg_inner = '\\line { ' + '  '.join(
+            f'\\bold "{_esc(below.get(off, ""))}"' for off, _ in above
+        ) + ' }'
 
-    # Fixed-width centered cell: chord row above, a degree box that hugs its content
-    # (variable width, with padding) so long degrees like "#IVmaj7 IVmaj7" never clip.
-    return (
-        f'\\hcenter-in #{_CELL_WIDTH} \\center-column {{ '
-        f'{chords_md} '
-        f'\\rounded-box \\pad-x #0.8 \\large {degrees_md} '
-        f'}}'
-    )
+    chord_cell = f'\\hcenter-in #{_CELL_WIDTH} {chord_inner}'
+    deg_cell = f'\\hcenter-in #{_CELL_WIDTH} \\large {deg_inner}'
+    return chord_cell, deg_cell
 
 
 def _chart_to_ly(score: stream.Score, stem: str) -> str:
@@ -414,14 +410,27 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
     bpm = int(round(mm[0].number)) if mm else 120
 
     measures = list(part.getElementsByClass('Measure'))
-    cells = [_measure_cell_ly(m) for m in measures]
+    cells = [_measure_cell_parts(m) for m in measures]
+
+    # Vertical measure-divider and a matching invisible spacer for the chord-name line
+    # Leading/trailing spaces are required so LilyPond tokenises correctly after a `}`
+    vbar = f' \\hspace #0.4 \\draw-line #\'(0 . {_BAR_HEIGHT}) \\hspace #0.4 '
+    barspace = ' \\hspace #0.8 '
 
     # One top-level \markup block per row → LilyPond paginates between blocks.
     rows: list[str] = []
     for i in range(0, len(cells), _MEASURES_PER_LINE):
-        row_cells = cells[i:i + _MEASURES_PER_LINE]
-        joined = ' '.join(row_cells)
-        rows.append(f'\\markup \\vspace #0.6\n\\markup \\line {{ \\hspace #5 {joined} }}')
+        row = cells[i:i + _MEASURES_PER_LINE]
+        chord_line = barspace.join(c for c, _ in row)
+        # Degree strip: measures separated by vbars, all wrapped in ONE rounded box
+        deg_strip = vbar.join(d for _, d in row)
+        rows.append(
+            '\\markup \\vspace #0.8\n'
+            '\\markup \\line { \\hspace #4 \\center-column { '
+            f'\\line {{ {chord_line} }} '
+            f'\\rounded-box \\line {{ {vbar} {deg_strip} {vbar} }} '
+            '} }'
+        )
     body = "\n".join(rows)
 
     subtitle = _esc(f"Key: {key_name}   |   {beats}/{denom}   |   tempo {bpm}")
