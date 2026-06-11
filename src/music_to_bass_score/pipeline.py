@@ -15,6 +15,7 @@ from .logger import get_logger
 from .pdf_exporter import ExportResult, export_to_pdf
 from .roman_numeral import measures_to_roman
 from .score_builder import build_chord_chart
+from .separator import separate_bass_cached
 
 logger = get_logger(__name__)
 
@@ -162,12 +163,21 @@ def _run_from_metadata(
     )
     logger.info("Measure grid: anchor=%.3fs, %d measures", anchor, len(measure_grid))
 
+    # Demucs bass separation → clean bass line for accurate inversion-slash notation.
+    # Optional: on failure the chord detector falls back to a full-mix low chroma.
+    cb("베이스 분리 중... (수 분 소요)", 0.40)
+    bass_stem_path = separate_bass_cached(
+        song_metadata.audio_path,
+        progress_cb=lambda p: cb("베이스 분리 중... (수 분 소요)", 0.40 + p * 0.05),
+    )
+
     cb("코드 진행 분석 중...", 0.45)
     chord_labels = detect_chords_per_measure(
         audio_path=song_metadata.audio_path,   # full mix: harmony needed for chord quality
         bpm=analysis.bpm,
         time_sig_num=analysis.time_signature_num,
         measure_grid=measure_grid,
+        bass_stem_path=bass_stem_path,          # clean bass for inversion-slash
     )
 
     cb("도수 분석 중...", 0.70)

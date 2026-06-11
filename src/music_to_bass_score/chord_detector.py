@@ -69,21 +69,28 @@ def detect_chords_per_measure(
     time_sig_num: int,
     measure_grid: Optional[list[float]] = None,
     sample_rate: int = SAMPLE_RATE,
+    bass_stem_path: Optional[Path] = None,
 ) -> list[list[tuple[float, str]]]:
     """Detect chord changes per measure.
 
     Returns a list (one entry per measure) of (beat_offset, chord_symbol) tuples,
     with consecutive identical chords collapsed to change points.
 
-    Primary engine: the pretrained BTC Transformer (large vocabulary). Falls back to
-    the librosa chroma matcher if BTC is unavailable or errors. `audio_path` should be
-    the FULL mix (harmony needed for chord quality).
+    Primary engine: the pretrained BTC Transformer (large vocabulary) on the FULL
+    mix (harmony needed for chord quality). Falls back to the librosa chroma matcher
+    if BTC is unavailable or errors.
+
+    `bass_stem_path`, when provided (a Demucs-separated bass stem), supplies a clean
+    bass line for accurate inversion-slash notation. Without it, a (noisier) full-mix
+    low-register chroma is used.
     """
     if measure_grid and len(measure_grid) >= 1:
         try:
             from . import btc_chord
             if btc_chord.is_available():
-                return _chords_from_btc(audio_path, measure_grid, time_sig_num, bpm)
+                return _chords_from_btc(
+                    audio_path, measure_grid, time_sig_num, bpm, bass_stem_path
+                )
             logger.warning("BTC model not found; using chroma fallback")
         except Exception as exc:
             logger.warning("BTC chord recognition failed (%s); using chroma fallback", exc)
@@ -108,24 +115,38 @@ def _chords_from_btc(
     measure_grid: list[float],
     time_sig_num: int,
     bpm: float,
+    bass_stem_path: Optional[Path] = None,
 ) -> list[list[tuple[float, str]]]:
-    """Map the BTC chord timeline adaptively, then add inversion-slash notation."""
+    """Map the BTC chord timeline adaptively, then add inversion-slash notation.
+
+    Chords come from BTC on the FULL mix. The bass note for inversion-slash comes
+    from a clean Demucs bass stem when `bass_stem_path` is given (far more reliable),
+    otherwise from a full-mix low-register chroma.
+    """
     from . import btc_chord
 
     logger.info(
-        "Detecting chords (BTC large-voca): %s (bpm=%.1f time_sig=%d/4 grid=%d measures)",
+        "Detecting chords (BTC large-voca): %s (bpm=%.1f time_sig=%d/4 grid=%d measures, bass_stem=%s)",
         audio_path, bpm, time_sig_num, len(measure_grid),
+        "clean" if bass_stem_path else "full-mix",
     )
     timeline = btc_chord.recognize_chords(audio_path)
     spm = (60.0 / bpm) * time_sig_num  # seconds per measure
 
-    # Load audio once for bass detection
-    y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
-    y_h = librosa.effects.harmonic(y, margin=4.0)
-    bass_ch = librosa.feature.chroma_cqt(
-        y=y_h, sr=sr, hop_length=HOP_LENGTH,
-        fmin=librosa.note_to_hz("C2"), n_octaves=2,
-    )
+    # Bass chroma source: prefer a clean separated bass stem; else full-mix low band.
+    if bass_stem_path is not None and Path(bass_stem_path).is_file():
+        y, sr = librosa.load(str(bass_stem_path), sr=SAMPLE_RATE, mono=True)
+        bass_ch = librosa.feature.chroma_cqt(
+            y=y, sr=sr, hop_length=HOP_LENGTH,
+            fmin=librosa.note_to_hz("C1"), n_octaves=3,
+        )
+    else:
+        y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+        y = librosa.effects.harmonic(y, margin=4.0)
+        bass_ch = librosa.feature.chroma_cqt(
+            y=y, sr=sr, hop_length=HOP_LENGTH,
+            fmin=librosa.note_to_hz("C2"), n_octaves=2,
+        )
     times = librosa.frames_to_time(
         np.arange(bass_ch.shape[1]), sr=sr, hop_length=HOP_LENGTH
     )

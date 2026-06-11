@@ -23,6 +23,37 @@ class SeparationResult:
     stems_dir: Path
 
 
+def separate_bass_cached(
+    audio_path: Path,
+    output_dir: Path = STEMS_DIR,
+    model_name: str = "htdemucs",
+    device: str = "auto",
+    progress_cb: Optional[Callable[[float], None]] = None,
+) -> Optional[Path]:
+    """Separate the bass stem, reusing a cached result if present.
+
+    Uses the lighter single-model `htdemucs` (bag of 1) by default — fast enough
+    for CPU and more than adequate for bass-note detection. Returns the bass-stem
+    path, or None if separation is unavailable/fails (caller falls back gracefully).
+    """
+    stem_dir = output_dir / model_name / audio_path.stem
+    bass_path = stem_dir / "bass.wav"
+    if bass_path.is_file() and bass_path.stat().st_size > 0:
+        logger.info("Reusing cached bass stem: %s", bass_path)
+        if progress_cb:
+            progress_cb(1.0)
+        return bass_path
+    try:
+        result = separate_bass(
+            audio_path, output_dir=output_dir, model_name=model_name,
+            device=device, progress_cb=progress_cb,
+        )
+        return result.bass_path
+    except Exception as exc:  # noqa: BLE001 — separation is optional, never fatal
+        logger.warning("Bass separation failed (%s); chord detection will use full mix", exc)
+        return None
+
+
 def separate_bass(
     audio_path: Path,
     output_dir: Path = STEMS_DIR,
