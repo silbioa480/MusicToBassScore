@@ -19,8 +19,8 @@ SAMPLE_RATE: int = 44100
 HOP_LENGTH: int = 512
 N_FFT: int = 2048
 
-MIN_NOTE_DURATION_SEC: float = 0.08
-BASS_MIN_FREQUENCY: float = 30.0
+MIN_NOTE_DURATION_SEC: float = 0.12   # 120ms — removes sub-eighth-note artifacts
+BASS_MIN_FREQUENCY: float = 40.0    # ≈ E1 (41.2 Hz) — standard bass guitar lowest string
 BASS_MAX_FREQUENCY: float = 300.0
 
 LILYPOND_BIN: str = "lilypond"
