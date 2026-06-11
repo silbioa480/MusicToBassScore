@@ -204,7 +204,7 @@ def _run_from_metadata(
 
 
 def _ensure_wav(audio_path: Path, cb: Callable) -> Path:
-    """Return a WAV version of the audio file, converting via ffmpeg if needed."""
+    """Return a WAV version of the audio file, converting via librosa+soundfile if needed."""
     if audio_path.suffix.lower() == ".wav":
         return audio_path
 
@@ -213,9 +213,22 @@ def _ensure_wav(audio_path: Path, cb: Callable) -> Path:
         logger.info("WAV cache hit: %s", wav_path)
         return wav_path
 
-    logger.info("Converting %s → %s via ffmpeg", audio_path.suffix, wav_path)
-    cb("오디오 형식 변환 중 (ffmpeg)...", 0.03)
+    logger.info("Converting %s → %s via librosa", audio_path.suffix, wav_path)
+    cb("오디오 형식 변환 중...", 0.03)
 
+    try:
+        import librosa
+        import soundfile as sf
+        y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=False)
+        if y.ndim == 1:
+            y = y[None, :]
+        sf.write(str(wav_path), y.T, sr, subtype="PCM_16")
+        logger.info("Conversion complete: %s (%dKB)", wav_path, wav_path.stat().st_size // 1024)
+        return wav_path
+    except Exception as exc:
+        logger.warning("librosa conversion failed (%s), trying ffmpeg fallback", exc)
+
+    cb("오디오 형식 변환 중 (ffmpeg)...", 0.04)
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found. Install it: sudo apt-get install ffmpeg")
 
