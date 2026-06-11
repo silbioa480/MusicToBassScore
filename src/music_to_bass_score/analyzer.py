@@ -108,7 +108,32 @@ def _estimate_bpm_and_beats(y: np.ndarray, sr: int) -> tuple[float, np.ndarray]:
     tempo, beats = librosa.beat.beat_track(y=y, sr=sr, hop_length=HOP_LENGTH)
     if isinstance(tempo, np.ndarray):
         tempo = float(tempo[0]) if len(tempo) > 0 else 120.0
-    return float(tempo), beats
+    tempo = _correct_tempo_octave(float(tempo), y, sr)
+    return tempo, beats
+
+
+def _correct_tempo_octave(tempo_bt: float, y: np.ndarray, sr: int) -> float:
+    """Fix beat_track's frequent half/double-tempo (octave) errors.
+
+    beat_track often locks onto half or double the true tempo (e.g. reports 75 for a
+    150 BPM song). The autocorrelation-based `librosa.feature.tempo` is more reliable
+    for the overall tempo, so we pick whichever octave of the beat_track tempo
+    (×0.5, ×1, ×2) lies closest to that autocorrelation estimate.
+    """
+    if tempo_bt <= 0:
+        return tempo_bt
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
+    tempo_ac = float(
+        librosa.feature.tempo(onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH)[0]
+    )
+    candidates = [tempo_bt * 0.5, tempo_bt, tempo_bt * 2.0]
+    corrected = min(candidates, key=lambda c: abs(c - tempo_ac))
+    if abs(corrected - tempo_bt) > 1e-3:
+        logger.info(
+            "Tempo octave corrected: beat_track=%.1f → %.1f (autocorr=%.1f)",
+            tempo_bt, corrected, tempo_ac,
+        )
+    return corrected
 
 
 def _estimate_key(y: np.ndarray, sr: int) -> str:

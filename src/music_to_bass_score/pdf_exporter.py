@@ -352,6 +352,9 @@ _MEASURES_PER_LINE = 4
 # margins, 4 cells + inner dividers fill the page width with minimal side whitespace
 # while still fitting long two-degree cells.
 _CELL_WIDTH = 24
+# Built-in whitespace margin (staff-spaces) baked around each row so adjacent rows
+# always have a wide, uniform vertical gap regardless of LilyPond system spacing.
+_ROW_PAD = 2.2
 
 
 def _measure_cell_parts(measure) -> tuple[str, str]:
@@ -456,8 +459,15 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
         else:
             box_line = box
 
+        # \pad-markup #_ROW_PAD bakes a fixed whitespace margin around the WHOLE row
+        # (chord line + box) directly into the row's bounding box. This is the only
+        # reliable way to space top-level markups: inter-markup spacing variables
+        # (markup-system-spacing) are not honoured between consecutive markups, which
+        # left rows cramped and made box borders collide with the next row's text.
+        # A per-row built-in margin guarantees a uniform, generous gap and clearance.
         rows.append(
-            '\\markup \\fill-line { \\center-column { '
+            '\\markup \\fill-line { '
+            f'\\pad-markup #{_ROW_PAD} \\center-column {{ '
             f'\\line {{ {chord_line} }} '
             f'{box_line} '
             '} }'
