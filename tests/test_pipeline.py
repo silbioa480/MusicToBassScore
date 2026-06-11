@@ -121,6 +121,67 @@ class TestPipelineMocked:
         assert fracs[-1] == pytest.approx(1.0)
 
 
+class TestRunPipelineFromFile:
+    """Tests for the file-upload pipeline entry point."""
+
+    def test_returns_result(self, sample_wav_path, tmp_path):
+        from music_to_bass_score.pipeline import run_pipeline_from_file
+        result = run_pipeline_from_file(
+            audio_path=sample_wav_path,
+            title="File Test",
+            artist="Test Artist",
+            output_dir=tmp_path,
+        )
+        assert isinstance(result, PipelineResult)
+
+    def test_title_from_arg(self, sample_wav_path, tmp_path):
+        from music_to_bass_score.pipeline import run_pipeline_from_file
+        result = run_pipeline_from_file(
+            audio_path=sample_wav_path, title="My Song", output_dir=tmp_path
+        )
+        assert result.metadata.title == "My Song"
+
+    def test_title_falls_back_to_stem(self, sample_wav_path, tmp_path):
+        from music_to_bass_score.pipeline import run_pipeline_from_file
+        result = run_pipeline_from_file(
+            audio_path=sample_wav_path, title="", output_dir=tmp_path
+        )
+        assert result.metadata.title == sample_wav_path.stem
+
+    def test_pdf_created(self, sample_wav_path, tmp_path):
+        from music_to_bass_score.pipeline import run_pipeline_from_file
+        result = run_pipeline_from_file(
+            audio_path=sample_wav_path, output_dir=tmp_path
+        )
+        assert result.export.pdf_path.exists()
+        assert result.export.pdf_path.stat().st_size > 0
+
+    def test_nonexistent_file_raises(self, tmp_path):
+        from pathlib import Path
+        from music_to_bass_score.pipeline import run_pipeline_from_file
+        with pytest.raises(FileNotFoundError):
+            run_pipeline_from_file(
+                audio_path=Path("/no/such/file.wav"), output_dir=tmp_path
+            )
+
+    def test_unsupported_format_raises(self, tmp_path):
+        from music_to_bass_score.pipeline import run_pipeline_from_file
+        fake = tmp_path / "song.xyz"
+        fake.write_bytes(b"fake")
+        with pytest.raises(ValueError, match="Unsupported"):
+            run_pipeline_from_file(audio_path=fake, output_dir=tmp_path)
+
+    def test_progress_callback(self, sample_wav_path, tmp_path):
+        from music_to_bass_score.pipeline import run_pipeline_from_file
+        calls = []
+        run_pipeline_from_file(
+            audio_path=sample_wav_path,
+            output_dir=tmp_path,
+            progress_cb=lambda msg, frac: calls.append(frac),
+        )
+        assert calls[-1] == pytest.approx(1.0)
+
+
 @pytest.mark.integration
 class TestPipelineIntegration:
     """Real end-to-end test requiring YouTube access and GPU/CPU time."""

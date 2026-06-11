@@ -1,6 +1,7 @@
 """MusicToBassScore — Streamlit Web Application."""
 
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -27,83 +28,143 @@ with st.sidebar:
     st.divider()
     st.caption("⚠️ 본 앱은 개인/교육 목적으로만 사용하세요. YouTube 이용약관을 준수하세요.")
 
-# ─── Main UI ────────────────────────────────────────────────────────────────
+# ─── Header ─────────────────────────────────────────────────────────────────
 
 st.title("🎸 MusicToBassScore")
-st.subheader("YouTube → 베이스 기타 악보 자동 생성")
-
+st.subheader("베이스 기타 악보 자동 생성")
 st.markdown(
-    """
-    유튜브 URL을 입력하면 AI가 베이스 파트를 분리하고,
-    **오선보 + TAB** 형식의 PDF 악보를 자동으로 생성합니다.
-
-    > ⏱️ 처리 시간: 4분 곡 기준 약 **5~15분** (CPU 환경)
-    """
+    "AI가 베이스 파트를 분리하고 **오선보 + TAB** 형식의 PDF 악보를 자동으로 생성합니다.\n\n"
+    "> ⏱️ 처리 시간: 4분 곡 기준 약 **5~15분** (CPU 환경)"
 )
 
 st.divider()
 
-url_input = st.text_input(
-    "YouTube URL",
-    placeholder="https://www.youtube.com/watch?v=...",
-    help="youtube.com/watch?v=... 또는 youtu.be/... 형식을 지원합니다",
-)
+# ─── Input tabs ─────────────────────────────────────────────────────────────
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    generate_btn = st.button("🎵 악보 생성", type="primary", use_container_width=True)
-with col2:
-    clear_btn = st.button("초기화", use_container_width=True)
+tab_youtube, tab_file = st.tabs(["🔗 YouTube URL", "📁 음원 파일 업로드"])
 
-if clear_btn:
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    st.rerun()
+with tab_youtube:
+    url_input = st.text_input(
+        "YouTube URL",
+        placeholder="https://www.youtube.com/watch?v=...",
+        help="youtube.com/watch?v=... 또는 youtu.be/... 형식을 지원합니다",
+        key="url_input",
+    )
+    youtube_btn = st.button(
+        "🎵 악보 생성", type="primary", use_container_width=True, key="youtube_btn"
+    )
 
-# ─── Pipeline execution ──────────────────────────────────────────────────────
+with tab_file:
+    st.info(
+        "💡 YouTube 다운로드 없이 로컬 음원 파일로 직접 악보를 생성합니다.\n\n"
+        "지원 형식: **WAV, MP3, FLAC, OGG, M4A, AAC**"
+    )
+    uploaded_file = st.file_uploader(
+        "음원 파일 선택",
+        type=["wav", "mp3", "flac", "ogg", "m4a", "aac", "opus"],
+        key="uploaded_file",
+    )
+    col_meta1, col_meta2 = st.columns(2)
+    with col_meta1:
+        file_title = st.text_input(
+            "곡 제목 (선택)",
+            placeholder="예: Lemon",
+            key="file_title",
+        )
+    with col_meta2:
+        file_artist = st.text_input(
+            "아티스트 (선택)",
+            placeholder="예: 米津玄師",
+            key="file_artist",
+        )
+    file_btn = st.button(
+        "🎵 악보 생성", type="primary", use_container_width=True, key="file_btn",
+        disabled=(uploaded_file is None),
+    )
 
-if generate_btn and url_input.strip():
-    from music_to_bass_score.downloader import validate_youtube_url
+col_clear, _ = st.columns([1, 3])
+with col_clear:
+    if st.button("초기화", key="clear_btn"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 
-    if not validate_youtube_url(url_input.strip()):
-        st.error("❌ 유효하지 않은 YouTube URL입니다. 올바른 형식을 입력해 주세요.")
-        st.stop()
+# ─── Progress helpers ────────────────────────────────────────────────────────
 
+def _make_progress_cb():
     progress_bar = st.progress(0.0)
     status_text = st.empty()
 
-    def progress_cb(msg: str, frac: float) -> None:
+    def cb(msg: str, frac: float) -> None:
         progress_bar.progress(min(frac, 1.0))
         status_text.text(f"⏳ {msg}")
 
+    return cb, progress_bar, status_text
+
+
+def _handle_error(exc: Exception, progress_bar, status_text) -> None:
+    progress_bar.empty()
+    status_text.empty()
+    label = type(exc).__name__
+    st.error(f"❌ {label}: {exc}")
+    from music_to_bass_score.config import PROJECT_ROOT
+    log_path = PROJECT_ROOT / "logs" / "app.log"
+    if log_path.exists():
+        with open(log_path) as f:
+            lines = f.readlines()
+        last_lines = "".join(lines[-40:])
+        with st.expander("🪵 오류 로그 (최근 40줄)"):
+            st.code(last_lines, language="text")
+    st.stop()
+
+
+# ─── YouTube pipeline ────────────────────────────────────────────────────────
+
+if youtube_btn and url_input.strip():
+    from music_to_bass_score.downloader import validate_youtube_url
+
+    if not validate_youtube_url(url_input.strip()):
+        st.error("❌ 유효하지 않은 YouTube URL입니다.")
+        st.stop()
+
+    cb, progress_bar, status_text = _make_progress_cb()
+
     try:
         from music_to_bass_score.pipeline import run_pipeline
-
         result = run_pipeline(
             youtube_url=url_input.strip(),
             include_tab=include_tab,
             pdf_method=pdf_method,
-            progress_cb=progress_cb,
+            progress_cb=cb,
         )
         st.session_state["result"] = result
-        progress_bar.progress(1.0)
-        status_text.text("✅ 완료!")
+    except Exception as exc:
+        _handle_error(exc, progress_bar, status_text)
 
-    except ValueError as e:
-        progress_bar.empty()
-        status_text.empty()
-        st.error(f"❌ 입력 오류: {e}")
-        st.stop()
-    except RuntimeError as e:
-        progress_bar.empty()
-        status_text.empty()
-        st.error(f"❌ 처리 오류: {e}")
-        st.stop()
-    except Exception as e:
-        progress_bar.empty()
-        status_text.empty()
-        st.error(f"❌ 예기치 않은 오류가 발생했습니다: {e}")
-        st.stop()
+# ─── File upload pipeline ────────────────────────────────────────────────────
+
+if file_btn and uploaded_file is not None:
+    from music_to_bass_score.config import AUDIO_DIR
+
+    suffix = Path(uploaded_file.name).suffix.lower()
+    save_path = AUDIO_DIR / uploaded_file.name
+    save_path.write_bytes(uploaded_file.read())
+
+    cb, progress_bar, status_text = _make_progress_cb()
+
+    try:
+        from music_to_bass_score.pipeline import run_pipeline_from_file
+        result = run_pipeline_from_file(
+            audio_path=save_path,
+            title=file_title.strip() or Path(uploaded_file.name).stem,
+            artist=file_artist.strip(),
+            include_tab=include_tab,
+            pdf_method=pdf_method,
+            progress_cb=cb,
+        )
+        st.session_state["result"] = result
+    except Exception as exc:
+        _handle_error(exc, progress_bar, status_text)
 
 # ─── Result display ──────────────────────────────────────────────────────────
 
@@ -119,20 +180,20 @@ if "result" in st.session_state:
         st.markdown("### 🎵 곡 정보")
         st.markdown(f"**제목**: {result.metadata.title}")
         st.markdown(f"**아티스트**: {result.metadata.artist}")
-        duration = result.metadata.duration_sec
-        st.markdown(f"**길이**: {int(duration // 60)}분 {int(duration % 60)}초")
+        dur = result.metadata.duration_sec
+        st.markdown(f"**길이**: {int(dur // 60)}분 {int(dur % 60)}초")
 
     with col_info2:
         st.markdown("### 📊 분석 결과")
         st.markdown(f"**조성**: {result.analysis.key}")
         st.markdown(f"**BPM**: {result.analysis.bpm_rounded}")
         st.markdown(
-            f"**박자**: {result.analysis.time_signature_num}/{result.analysis.time_signature_den}"
+            f"**박자**: "
+            f"{result.analysis.time_signature_num}/{result.analysis.time_signature_den}"
         )
         st.markdown(f"**감지된 마디 수**: {len(result.chord_labels)}")
 
     st.divider()
-
     st.markdown("### 🎼 코드 진행")
     if result.chord_labels:
         chords_per_row = 8
@@ -147,11 +208,9 @@ if "result" in st.session_state:
                 col.metric(label=f"마디 {measure_num}", value=chord)
 
     st.divider()
-
     st.markdown("### 📄 악보 다운로드")
 
     export_path = result.export.pdf_path
-
     if export_path.exists():
         with open(export_path, "rb") as f:
             file_bytes = f.read()
@@ -168,7 +227,6 @@ if "result" in st.session_state:
             mime=mime,
             use_container_width=True,
         )
-
         if suffix != ".pdf":
             st.info(
                 "ℹ️ LilyPond이 설치되지 않아 MusicXML 형식으로 출력되었습니다. "
@@ -183,5 +241,5 @@ if "result" in st.session_state:
         with open(result.separation.bass_path, "rb") as f:
             st.audio(f.read(), format="audio/wav")
 
-elif not generate_btn:
-    st.info("👆 YouTube URL을 입력하고 '악보 생성' 버튼을 눌러주세요.")
+elif not youtube_btn and not file_btn:
+    st.info("👆 YouTube URL을 입력하거나 음원 파일을 업로드하고 '악보 생성' 버튼을 눌러주세요.")
