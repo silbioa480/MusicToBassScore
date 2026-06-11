@@ -35,8 +35,8 @@ def transcribe_bass(
     bass_wav_path: Path,
     output_dir: Path = MIDI_DIR,
     min_note_duration: float = MIN_NOTE_DURATION_SEC,
-    onset_threshold: float = 0.5,   # balanced: catches 8th-note onsets without excess spurious notes
-    frame_threshold: float = 0.35,  # lowered: recovers notes in separated bass stem (signal is weaker)
+    onset_threshold: float = 0.4,   # aggressive: recover more 8th-note onsets
+    frame_threshold: float = 0.25,  # aggressive: separated bass stem has weak signal; capture more frames
     minimum_frequency: float = BASS_MIN_FREQUENCY,
     maximum_frequency: float = BASS_MAX_FREQUENCY,
     progress_cb: Optional[Callable[[float], None]] = None,

@@ -30,10 +30,17 @@ def build_score(
     song_metadata: SongMetadata,
     analysis: AudioAnalysis,
     note_events: list[NoteEvent],
-    chord_labels: list[str],
+    chord_labels: list,
     include_tab: bool = True,
+    measure_grid: Optional[list[float]] = None,
 ) -> stream.Score:
-    """Construct a music21 Score with bass clef staff and optional TAB."""
+    """Construct a music21 Score with bass clef staff and optional TAB.
+
+    chord_labels may be either list[str] (one label per measure) or
+    list[list[str]] (multiple labels per measure, placed at evenly spaced offsets).
+    measure_grid, when provided, gives constant-tempo measure-start times used to
+    map notes to measures (more stable than jittery beat tracking).
+    """
     logger.info(
         "Building score: %r by %r, %d notes, %d chords, tab=%s",
         song_metadata.title, song_metadata.artist,
@@ -48,7 +55,7 @@ def build_score(
 
     beats_per_measure = analysis.time_signature_num
     seconds_per_beat = 60.0 / analysis.bpm
-    beat_times = analysis.beat_times or []
+    grid = measure_grid or analysis.beat_times or []
 
     bass_part = _build_bass_part(
         note_events=note_events,
@@ -56,7 +63,7 @@ def build_score(
         analysis=analysis,
         beats_per_measure=beats_per_measure,
         seconds_per_beat=seconds_per_beat,
-        beat_times=beat_times,
+        measure_grid=grid,
     )
     score.append(bass_part)
 
@@ -66,20 +73,29 @@ def build_score(
             beats_per_measure=beats_per_measure,
             seconds_per_beat=seconds_per_beat,
             analysis=analysis,
-            beat_times=beat_times,
+            measure_grid=grid,
         )
         score.append(tab_part)
 
     return score
 
 
+def _normalize_measure_labels(entry) -> list[str]:
+    """Coerce a per-measure chord entry into a list of label strings."""
+    if entry is None:
+        return []
+    if isinstance(entry, str):
+        return [entry]
+    return [str(x) for x in entry]
+
+
 def _build_bass_part(
     note_events: list[NoteEvent],
-    chord_labels: list[str],
+    chord_labels: list,
     analysis: AudioAnalysis,
     beats_per_measure: int,
     seconds_per_beat: float,
-    beat_times: list[float],
+    measure_grid: list[float],
 ) -> stream.Part:
     part = stream.Part(id="bass")
     part.partName = "Bass Guitar"
@@ -98,7 +114,7 @@ def _build_bass_part(
     part.insert(0, mm)
 
     notes_by_measure = _group_notes_by_measure(
-        note_events, seconds_per_beat, beats_per_measure, beat_times
+        note_events, seconds_per_beat, beats_per_measure, measure_grid
     )
 
     n_measures = max(
@@ -110,14 +126,18 @@ def _build_bass_part(
         measure = stream.Measure(number=m_idx + 1)
 
         if m_idx < len(chord_labels):
-            try:
-                label = chord_labels[m_idx]
-                te = expressions.TextExpression(label)
-                te.style.fontStyle = 'bold'
-                te.placement = 'above'
-                measure.insert(0, te)
-            except Exception:
-                pass
+            labels = _normalize_measure_labels(chord_labels[m_idx])
+            n_lbl = len(labels)
+            for j, label in enumerate(labels):
+                try:
+                    te = expressions.TextExpression(label)
+                    te.style.fontStyle = 'bold'
+                    te.placement = 'above'
+                    # Evenly space labels across the measure (offset in quarter beats)
+                    off = (beats_per_measure * j / n_lbl) if n_lbl > 0 else 0.0
+                    measure.insert(off, te)
+                except Exception:
+                    pass
 
         measure_notes = notes_by_measure.get(m_idx, [])
         if measure_notes:
@@ -137,7 +157,7 @@ def _build_tab_part(
     beats_per_measure: int,
     seconds_per_beat: float,
     analysis: AudioAnalysis,
-    beat_times: list[float],
+    measure_grid: list[float],
 ) -> stream.Part:
     """Build a simplified TAB representation as a second part."""
     from music21 import tablature
@@ -157,7 +177,7 @@ def _build_tab_part(
     part.append(time_sig)
 
     notes_by_measure = _group_notes_by_measure(
-        note_events, seconds_per_beat, beats_per_measure, beat_times
+        note_events, seconds_per_beat, beats_per_measure, measure_grid
     )
 
     n_measures = max(notes_by_measure.keys()) + 1 if notes_by_measure else 1
@@ -192,29 +212,28 @@ def _group_notes_by_measure(
     note_events: list[NoteEvent],
     seconds_per_beat: float,
     beats_per_measure: int,
-    beat_times: Optional[list[float]] = None,
+    measure_grid: Optional[list[float]] = None,
 ) -> dict[int, list[m21note.Note]]:
     """Convert NoteEvents to music21 Notes grouped by measure index.
 
-    When beat_times is provided, uses actual beat positions (from librosa beat tracker)
-    to map notes to measures — eliminates drift from BPM estimation error and pickup measures.
-    Falls back to fixed BPM arithmetic when beat_times is unavailable.
+    When measure_grid (constant-tempo measure-start times) is provided, notes are
+    mapped to measures by searchsorted on those boundaries — stable and jitter-free.
+    Falls back to fixed BPM arithmetic when no grid is available.
     """
-    if beat_times and len(beat_times) >= beats_per_measure:
-        return _group_by_beat_times(note_events, beat_times, beats_per_measure, seconds_per_beat)
+    if measure_grid and len(measure_grid) >= 2:
+        return _group_by_grid(note_events, measure_grid, seconds_per_beat)
     return _group_by_fixed_bpm(note_events, seconds_per_beat, beats_per_measure)
 
 
-def _group_by_beat_times(
+def _group_by_grid(
     note_events: list[NoteEvent],
-    beat_times: list[float],
-    beats_per_measure: int,
+    measure_grid: list[float],
     seconds_per_beat: float,
 ) -> dict[int, list[m21note.Note]]:
     import numpy as np
     from music21 import pitch as m21pitch
 
-    measure_starts = np.array(beat_times[::beats_per_measure])
+    measure_starts = np.array(measure_grid)
     groups: dict[int, list[m21note.Note]] = {}
 
     for event in note_events:

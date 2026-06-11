@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
-from .analyzer import AudioAnalysis, analyze_audio
+from .analyzer import AudioAnalysis, analyze_audio, build_measure_grid, detect_first_onset
 from .chord_detector import detect_chords_per_measure
 from .config import AUDIO_DIR, MIDI_DIR, SAMPLE_RATE, SCORES_DIR, STEMS_DIR
 from .downloader import SongMetadata, download_audio
@@ -162,12 +162,23 @@ def _run_from_metadata(
         progress_cb=lambda f: cb("음표 인식 중...", 0.65 + f * 0.15),
     )
 
+    # Constant-tempo measure grid anchored at the first bass onset (downbeat proxy).
+    # Avoids the ±15% jitter of librosa beat tracking that drifts measure boundaries.
+    anchor = detect_first_onset(separation.bass_path)
+    measure_grid = build_measure_grid(
+        bpm=analysis.bpm,
+        beats_per_measure=analysis.time_signature_num,
+        anchor=anchor,
+        duration_sec=analysis.duration_sec,
+    )
+    logger.info("Measure grid: anchor=%.3fs, %d measures", anchor, len(measure_grid))
+
     cb("코드 진행 분석 중...", 0.80)
     chord_labels = detect_chords_per_measure(
         audio_path=separation.bass_path,   # bass stem: far cleaner root detection than full mix
         bpm=analysis.bpm,
         time_sig_num=analysis.time_signature_num,
-        beat_times=analysis.beat_times,
+        measure_grid=measure_grid,
     )
 
     cb("악보 생성 중...", 0.88)
@@ -177,6 +188,7 @@ def _run_from_metadata(
         note_events=transcription.note_events,
         chord_labels=chord_labels,
         include_tab=include_tab,
+        measure_grid=measure_grid,
     )
 
     cb("PDF 렌더링 중...", 0.95)

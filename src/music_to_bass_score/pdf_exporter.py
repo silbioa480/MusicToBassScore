@@ -132,20 +132,33 @@ def _q(x: float) -> float:
     return round(x * 8) / 8
 
 
-def _measure_to_ly(measure, beats: int, chord_label: Optional[str]) -> str:
+def _markup_for(label: str) -> str:
+    return f'^\\markup{{\\bold "{_esc(label)}"}}'
+
+
+def _measure_to_ly(measure, beats: int, chords: Optional[list]) -> str:
     """Render a music21 Measure as a LilyPond measure string of EXACTLY `beats` quarter beats.
 
-    Uses 32nd-note resolution throughout so the bar check | never overflows.
+    `chords` is a list of (offset_in_quarter_beats, label) tuples; each label's markup is
+    attached to the first token at or after its offset, so multiple chords per measure land
+    at their correct beat positions. Uses 32nd-note resolution so the bar check | never overflows.
     """
     from music21 import note as m21note
 
-    markup = ''
-    if chord_label:
-        markup = f'^\\markup{{\\bold "{_esc(chord_label)}"}}'
+    # Pending chords sorted by offset; placed greedily as the cursor advances.
+    pending = sorted(((_q(o), lbl) for o, lbl in (chords or []) if lbl), key=lambda x: x[0])
+
+    def _take_markup(cur_pos: float) -> str:
+        """Return markup for any chord whose offset has been reached, else ''."""
+        mk = ''
+        while pending and pending[0][0] <= cur_pos + 0.01:
+            _, lbl = pending.pop(0)
+            if not mk:  # one markup per token; collapse same-position duplicates
+                mk = _markup_for(lbl)
+        return mk
 
     tokens: list[str] = []
     cur = 0.0          # current time cursor in quarter beats (32nd-note grid)
-    chord_placed = False
     beats_f = float(beats)
 
     elems = sorted(measure.notesAndRests, key=lambda e: float(e.offset))
@@ -164,11 +177,7 @@ def _measure_to_ly(measure, beats: int, chord_label: Optional[str]) -> str:
         # Fill gap before this element with a rest
         gap = _q(off - cur)
         if gap >= 0.125:
-            mk = ''
-            if not chord_placed and markup:
-                mk = markup
-                chord_placed = True
-            tokens.append(_rest_ly(gap, mk))
+            tokens.append(_rest_ly(gap, _take_markup(cur)))
             cur = _q(cur + gap)
 
         # Snap cursor to the note's quantised start
@@ -184,11 +193,7 @@ def _measure_to_ly(measure, beats: int, chord_label: Optional[str]) -> str:
         if ql < 0.125:
             break  # Duration rounds to zero — stop
 
-        mk = ''
-        if not chord_placed and markup:
-            mk = markup
-            chord_placed = True
-
+        mk = _take_markup(cur)
         if isinstance(elem, m21note.Note):
             tokens.append(_note_ly(elem.pitch.midi, ql, mk))
         else:
@@ -202,15 +207,14 @@ def _measure_to_ly(measure, beats: int, chord_label: Optional[str]) -> str:
     # Fill remaining space to reach EXACTLY `beats` quarter beats
     tail = _q(beats_f - cur)
     if tail >= 0.125:
-        mk = ''
-        if not chord_placed and markup:
-            mk = markup
-            chord_placed = True
-        tokens.append(_rest_ly(tail, mk))
+        tokens.append(_rest_ly(tail, _take_markup(cur)))
 
     if not tokens:
-        mk = markup if markup else ''
-        tokens = [_rest_ly(float(beats), mk)]
+        tokens = [_rest_ly(float(beats), _take_markup(0.0))]
+    elif pending:
+        # Chord offsets past all tokens — attach the next one to the last token if free.
+        if '^\\markup' not in tokens[-1]:
+            tokens[-1] = tokens[-1] + _markup_for(pending[0][1])
 
     return ' '.join(tokens) + ' |'
 
@@ -261,12 +265,12 @@ def _score_to_ly(score: stream.Score, stem: str) -> str:
     tab_lines:  list[str] = []
 
     for i, measure in enumerate(bass_part.getElementsByClass('Measure')):
-        chord_label = None
-        for te in measure.getElementsByClass('TextExpression'):
-            chord_label = te.content
-            break
+        chords = [
+            (_q(float(te.offset)), te.content)
+            for te in measure.getElementsByClass('TextExpression')
+        ]
 
-        bass_lines.append(f"  {_measure_to_ly(measure, beats, chord_label)}  % m{i+1}")
+        bass_lines.append(f"  {_measure_to_ly(measure, beats, chords)}  % m{i+1}")
         tab_lines.append(f"  {_measure_to_ly(measure, beats, None)}")
 
         # Force a line break every MEASURES_PER_LINE measures

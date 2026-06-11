@@ -66,6 +66,44 @@ def analyze_audio(audio_path: Path) -> AudioAnalysis:
         raise
 
 
+def detect_first_onset(audio_path: Path, sr: int = SAMPLE_RATE) -> float:
+    """Return the time (seconds) of the first onset in the audio.
+
+    Used as a downbeat anchor for the constant-tempo measure grid. Far more stable
+    than librosa beat_track's jittery beat positions for building measure boundaries.
+    """
+    y, _ = librosa.load(str(audio_path), sr=sr, mono=True)
+    onset_frames = librosa.onset.onset_detect(y=y, sr=sr, hop_length=HOP_LENGTH, backtrack=True)
+    if len(onset_frames) == 0:
+        return 0.0
+    return float(librosa.frames_to_time(onset_frames[:1], sr=sr, hop_length=HOP_LENGTH)[0])
+
+
+def build_measure_grid(
+    bpm: float,
+    beats_per_measure: int,
+    anchor: float,
+    duration_sec: float,
+) -> list[float]:
+    """Build constant-tempo measure-start times anchored at `anchor`.
+
+    measure_start[i] = anchor + i * (60/bpm) * beats_per_measure
+
+    A constant grid avoids the ±15% jitter of librosa beat_track, keeping notes and
+    chords aligned to stable measure boundaries.
+    """
+    seconds_per_measure = (60.0 / bpm) * beats_per_measure
+    if seconds_per_measure <= 0:
+        return [0.0]
+    grid = []
+    t = anchor
+    # Include a measure that starts slightly before the end so trailing notes land somewhere
+    while t < duration_sec + seconds_per_measure:
+        grid.append(round(t, 4))
+        t += seconds_per_measure
+    return grid
+
+
 def _estimate_bpm_and_beats(y: np.ndarray, sr: int) -> tuple[float, np.ndarray]:
     tempo, beats = librosa.beat.beat_track(y=y, sr=sr, hop_length=HOP_LENGTH)
     if isinstance(tempo, np.ndarray):
