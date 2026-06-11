@@ -35,8 +35,8 @@ def transcribe_bass(
     bass_wav_path: Path,
     output_dir: Path = MIDI_DIR,
     min_note_duration: float = MIN_NOTE_DURATION_SEC,
-    onset_threshold: float = 0.6,   # raised: reduces spurious onsets
-    frame_threshold: float = 0.5,   # raised: reduces polyphonic over-detection
+    onset_threshold: float = 0.5,   # balanced: catches 8th-note onsets without excess spurious notes
+    frame_threshold: float = 0.35,  # lowered: recovers notes in separated bass stem (signal is weaker)
     minimum_frequency: float = BASS_MIN_FREQUENCY,
     maximum_frequency: float = BASS_MAX_FREQUENCY,
     progress_cb: Optional[Callable[[float], None]] = None,
@@ -77,7 +77,7 @@ def transcribe_bass(
     before = len(events)
     events = _filter_midi_range(events)
     events = _make_monophonic(events)
-    events = _merge_consecutive(events, max_gap_sec=min_note_duration)
+    events = _merge_consecutive(events, max_gap_sec=0.05)  # 50ms: only merge true Basic-Pitch dropout gaps, not repeated 8th notes
     logger.info(
         "Post-processing: %d raw → %d clean notes", before, len(events)
     )

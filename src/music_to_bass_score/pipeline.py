@@ -164,7 +164,7 @@ def _run_from_metadata(
 
     cb("코드 진행 분석 중...", 0.80)
     chord_labels = detect_chords_per_measure(
-        audio_path=song_metadata.audio_path,
+        audio_path=separation.bass_path,   # bass stem: far cleaner root detection than full mix
         bpm=analysis.bpm,
         time_sig_num=analysis.time_signature_num,
         beat_times=analysis.beat_times,
