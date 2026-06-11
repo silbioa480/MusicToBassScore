@@ -9,7 +9,7 @@ librosa>=0.10.2
 soundfile>=0.12.1
 numpy>=1.26.0,<2.3.0
 scipy>=1.13.0
-resampy>=0.4.3
+resampy>=0.2.2,<0.4.3
 
 # ─── Bass stem separation ─────────────────────────────────────────────────────
 demucs>=4.0.1

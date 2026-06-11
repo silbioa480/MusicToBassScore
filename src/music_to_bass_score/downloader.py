@@ -80,6 +80,7 @@ def download_audio(
         "progress_hooks": [_progress_hook],
         "quiet": True,
         "no_warnings": True,
+        "nocheckcertificate": True,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -107,7 +108,7 @@ def download_audio(
 
 
 def _fetch_info(url: str) -> dict:
-    ydl_opts = {"quiet": True, "no_warnings": True}
+    ydl_opts = {"quiet": True, "no_warnings": True, "nocheckcertificate": True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return info or {}

@@ -7,6 +7,7 @@ import music21
 from music21 import (
     chord as m21chord,
     clef,
+    expressions,
     harmony,
     key,
     metadata,
@@ -98,9 +99,11 @@ def _build_bass_part(
 
         if m_idx < len(chord_labels):
             try:
-                cs = harmony.ChordSymbol(chord_labels[m_idx])
-                cs.writeAsChord = False
-                measure.insert(0, cs)
+                label = chord_labels[m_idx]
+                te = expressions.TextExpression(label)
+                te.style.fontStyle = 'bold'
+                te.placement = 'above'
+                measure.insert(0, te)
             except Exception:
                 pass
 
