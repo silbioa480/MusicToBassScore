@@ -1,9 +1,22 @@
-"""Per-measure chord detection using librosa chroma features (full-mix based).
+"""Per-measure chord detection: BTC Transformer + bass-slash annotation.
 
-Detects chord SYMBOLS (root + quality) per half-measure (2-beat resolution) from the
-FULL mix — the full mix contains the harmony instruments needed to determine chord
-quality (major/minor/7th), which a monophonic bass line cannot provide. Returns two
-chord symbols per measure to capture fast harmonic rhythm.
+Primary engine: BTC large-voca Transformer on the full mix.
+
+Post-processing — slash bass:
+  Independently detect the dominant bass note from a C2-C4 chroma (<262 Hz).
+  When the bass note differs from the chord root, append it as a slash:
+  "G/B", "Am7/E", "C/G", etc.  This makes walking-bass and inversion voicings
+  explicit on the chart (e.g. C-G/B-Am-G descending bass line).
+
+Note on treble-based root correction:
+  Experiments showed that bass-guitar harmonics reach into the C5+ range
+  (D2's 8th harmonic = D5 at 588 Hz > C5 = 523 Hz), so frequency filtering
+  cannot reliably separate bass from upper-voice chroma.  Treble-root override
+  was therefore removed — it introduced false corrections on correctly-identified
+  root-position chords (C → G) without fixing bass-contaminated labels (D → A).
+  Proper source separation (Demucs) would solve this but is too slow on CPU.
+
+Falls back to the librosa chroma matcher if BTC is unavailable or errors.
 """
 
 from pathlib import Path
@@ -75,13 +88,17 @@ def detect_chords_per_measure(
     return _detect_chords_chroma(audio_path, bpm, time_sig_num, measure_grid, sample_rate)
 
 
+# ---------------------------------------------------------------------------
+# BTC path
+# ---------------------------------------------------------------------------
+
 def _chords_from_btc(
     audio_path: Path,
     measure_grid: list[float],
     time_sig_num: int,
     bpm: float,
 ) -> list[list[tuple[float, str]]]:
-    """Map the BTC chord timeline onto half-measure windows of the constant-tempo grid."""
+    """Map the BTC chord timeline onto half-measure windows, then add bass-slash."""
     from . import btc_chord
 
     logger.info(
@@ -92,21 +109,108 @@ def _chords_from_btc(
     seconds_per_measure = (60.0 / bpm) * time_sig_num
     segs = _measure_segments(time_sig_num)
 
-    measures: list[list[tuple[float, str]]] = []
+    # Build per-segment raw chords from BTC overlap voting
+    raw_segs: list[tuple[float, float, str]] = []
     for m_start in measure_grid:
-        seg_chords = []
         for s_frac, e_frac in segs:
             ws = m_start + s_frac * seconds_per_measure
             we = m_start + e_frac * seconds_per_measure
+            chord = btc_chord.chord_at_window(timeline, ws, we)
+            raw_segs.append((ws, we, chord))
+
+    # Load audio once for bass detection
+    y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+    y_h = librosa.effects.harmonic(y, margin=4.0)
+
+    # Bass chroma: C2-C4 (<262 Hz) — fundamental register of bass guitar
+    bass_ch = librosa.feature.chroma_cqt(
+        y=y_h, sr=sr, hop_length=HOP_LENGTH,
+        fmin=librosa.note_to_hz("C2"), n_octaves=2,
+    )
+    times = librosa.frames_to_time(
+        np.arange(bass_ch.shape[1]), sr=sr, hop_length=HOP_LENGTH
+    )
+
+    corrected: list[tuple[float, float, str]] = []
+    for ws, we, chord in raw_segs:
+        chord = _apply_slash_bass(chord, bass_ch, times, ws, we)
+        corrected.append((ws, we, chord))
+
+    # Re-group into per-measure lists
+    n_segs = len(segs)
+    measures: list[list[tuple[float, str]]] = []
+    for m_idx, m_start in enumerate(measure_grid):
+        seg_list = []
+        for s_idx, (s_frac, _) in enumerate(segs):
+            flat_idx = m_idx * n_segs + s_idx
+            if flat_idx >= len(corrected):
+                break
+            _ws, _we, chord = corrected[flat_idx]
             beat_offset = s_frac * time_sig_num
-            seg_chords.append((beat_offset, btc_chord.chord_at_window(timeline, ws, we)))
-        measures.append(seg_chords)
+            seg_list.append((beat_offset, chord))
+        measures.append(seg_list)
 
     measures = _smooth_chord_sequence(measures)
     preview = ["|".join(s for _, s in m) for m in measures[:6]]
     logger.info("BTC chord mapping complete: %d measures — %s", len(measures), preview)
     return measures
 
+
+def _chord_root(symbol: str) -> str:
+    """Extract root note name from a chord symbol (handles '#' accidentals)."""
+    if not symbol or symbol in ("N.C.", "NC"):
+        return ""
+    if len(symbol) > 1 and symbol[1] in ("#", "b"):
+        return symbol[:2]
+    return symbol[:1]
+
+
+def _chroma_window(ch: np.ndarray, times: np.ndarray, t0: float, t1: float) -> np.ndarray:
+    """Mean chroma vector over [t0, t1), normalised to [0,1]."""
+    mask = (times >= t0) & (times < t1)
+    if mask.sum() == 0:
+        return np.zeros(12)
+    vec = ch[:, mask].mean(axis=1)
+    mx = vec.max()
+    if mx < 1e-9:
+        return vec
+    return vec / mx
+
+
+# Minimum confidence for bass note (normalised 0-1) to trigger slash notation.
+# Set conservatively to avoid noise-induced slashes on ambiguous segments.
+_BASS_MIN_CONFIDENCE = 0.72
+
+
+def _apply_slash_bass(
+    chord: str, bass_ch: np.ndarray, times: np.ndarray, t0: float, t1: float
+) -> str:
+    """Append a slash-bass note when the dominant bass note differs from the chord root.
+
+    Uses C2-C4 chroma (fundamental register of bass guitar). Only appends when the
+    bass note confidence exceeds _BASS_MIN_CONFIDENCE to suppress noisy segments.
+    """
+    if chord in ("N.C.", "NC"):
+        return chord
+
+    chord_root = _chord_root(chord.split("/")[0])
+    if not chord_root:
+        return chord
+
+    bass_vec = _chroma_window(bass_ch, times, t0, t1)
+    bass_idx = int(np.argmax(bass_vec))
+    bass_conf = float(bass_vec[bass_idx])
+    bass_note = _NOTE_NAMES[bass_idx]
+
+    if bass_conf < _BASS_MIN_CONFIDENCE or bass_note == chord_root:
+        return chord
+
+    return f"{chord}/{bass_note}"
+
+
+# ---------------------------------------------------------------------------
+# Chroma fallback path
+# ---------------------------------------------------------------------------
 
 def _detect_chords_chroma(
     audio_path: Path,
@@ -138,15 +242,6 @@ def _detect_chords_chroma(
 
 
 def _harmonic_chroma(y: np.ndarray, sr: int) -> np.ndarray:
-    """Compute a clean chroma: HPSS harmonic component + tuning correction + CENS.
-
-    - HPSS removes percussive/transient energy (drums) that pollutes pitch content.
-    - Tuning estimation corrects for songs not at exact A440.
-    - chroma_cens applies L1-norm → amplitude quantisation (6 levels) → window average,
-      making it more robust to dynamics and timbre than raw chroma_cqt.
-    - win_len_smooth=9 (~0.21 s at 512/22050) preserves beat-level resolution while
-      still suppressing frame-level jitter.
-    """
     y_h = librosa.effects.harmonic(y, margin=4.0)
     tuning = librosa.estimate_tuning(y=y_h, sr=sr)
     chroma = librosa.feature.chroma_cens(
@@ -159,14 +254,7 @@ def _harmonic_chroma(y: np.ndarray, sr: int) -> np.ndarray:
 def _smooth_chord_sequence(
     measures: list[list[tuple[float, str]]],
 ) -> list[list[tuple[float, str]]]:
-    """Remove isolated single-segment outliers, then collapse identical neighbors.
-
-    Input is the raw uncollapsed per-segment sequence (offsets preserved). A segment
-    whose chord differs from BOTH neighbors, where those neighbors agree, is treated as
-    a one-off blip and replaced. Sustained changes (2+ consecutive segments) are kept.
-    Finally each measure's consecutive identical segments collapse to change points.
-    """
-    # Flatten to a single chord stream, remembering each segment's (measure, offset)
+    """Remove isolated single-segment outliers, then collapse identical neighbors."""
     flat: list[str] = []
     index: list[tuple[int, float]] = []
     for m_idx, segs in enumerate(measures):
@@ -174,13 +262,11 @@ def _smooth_chord_sequence(
             flat.append(chord)
             index.append((m_idx, off))
 
-    # Mode filter: fix a lone outlier surrounded by an agreeing pair
     fixed = flat[:]
     for i in range(1, len(flat) - 1):
         if flat[i] != flat[i - 1] and flat[i - 1] == flat[i + 1]:
             fixed[i] = flat[i - 1]
 
-    # Scatter back into per-measure segment lists, then collapse identical neighbors
     rebuilt: list[list[tuple[float, str]]] = [[] for _ in measures]
     for (m_idx, off), chord in zip(index, fixed):
         rebuilt[m_idx].append((off, chord))
@@ -189,13 +275,6 @@ def _smooth_chord_sequence(
 
 
 def _match_chord(chroma: np.ndarray, start_frame: int, end_frame: int) -> str:
-    """Template-match the mean chroma over a frame range to the nearest chord symbol.
-
-    After finding the best match, applies a simplicity bias: if the same-root triad
-    scores within 0.025 of the best 7th/maj7 chord, prefer the simpler triad.
-    7th tones often appear from ringing strings or adjacent voices rather than the
-    chord itself, so this reduces systematic over-detection of seventh chords.
-    """
     end_frame = max(start_frame + 1, min(end_frame, chroma.shape[1]))
     if start_frame >= chroma.shape[1]:
         return "N.C."
@@ -211,7 +290,6 @@ def _match_chord(chroma: np.ndarray, start_frame: int, end_frame: int) -> str:
         if score > best_score:
             best_score, best_name = score, name
 
-    # Simplicity bias: prefer triad over 7th when margin is within threshold
     root = best_name[:2] if len(best_name) > 1 and best_name[1] in ("#", "b") else best_name[:1]
     quality = best_name[len(root):]
     if quality in ("7", "m7", "maj7"):
@@ -223,21 +301,15 @@ def _match_chord(chroma: np.ndarray, start_frame: int, end_frame: int) -> str:
     return best_name
 
 
-# Half-measure (2-segment) resolution: smoother/more reliable than per-beat template
-# matching, which jitters every beat. Each measure yields its two half-measure chords,
-# then identical halves collapse to one — so a steady measure shows one chord and a
-# changing measure shows two, at the beat offsets where the change occurs.
 _SEGMENTS_PER_MEASURE = 2
 
 
 def _measure_segments(time_sig_num: int) -> list[tuple[float, float]]:
-    """Return (start_fraction, end_fraction) of each detection segment within a measure."""
     n = _SEGMENTS_PER_MEASURE
     return [(i / n, (i + 1) / n) for i in range(n)]
 
 
 def _collapse_segments(seg_chords: list[tuple[float, str]]) -> list[tuple[float, str]]:
-    """Collapse consecutive identical (offset, chord) segments, keeping first offset."""
     result: list[tuple[float, str]] = []
     prev = None
     for off, chord in seg_chords:
@@ -254,7 +326,6 @@ def _chords_from_grid(
     bpm: float,
     sr: int,
 ) -> list[list[tuple[float, str]]]:
-    """Half-measure detection on the constant-tempo grid (raw, uncollapsed segments)."""
     seconds_per_measure = (60.0 / bpm) * time_sig_num
     segs = _measure_segments(time_sig_num)
     measures: list[list[tuple[float, str]]] = []
@@ -279,7 +350,6 @@ def _chords_from_fixed_bpm(
     time_sig_num: int,
     sr: int,
 ) -> list[list[tuple[float, str]]]:
-    """Fallback: fixed-BPM half-measure segmentation from frame 0 (raw, uncollapsed)."""
     beat_frames = (60.0 / bpm) * (sr / HOP_LENGTH)
     measure_frames = beat_frames * time_sig_num
     segs = _measure_segments(time_sig_num)

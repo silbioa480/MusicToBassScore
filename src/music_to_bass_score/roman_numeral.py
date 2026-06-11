@@ -35,10 +35,21 @@ def _quality_suffix(symbol: str) -> str:
 def chord_to_roman(symbol: str, key_str: str) -> str:
     """Return the roman-numeral degree of `symbol` within key `key_str` (e.g. 'C major').
 
+    Handles slash chords (e.g. 'G/B'): converts the upper chord part to a roman
+    numeral and appends the bass degree as a slash (e.g. 'I/III').
     Falls back to the raw chord symbol if analysis fails.
     """
     if not symbol or symbol in ("N.C.", "NC"):
         return symbol or ""
+
+    # Split slash chord: upper chord + optional bass note
+    if "/" in symbol:
+        upper, bass_note = symbol.split("/", 1)
+        upper_rn = chord_to_roman(upper, key_str)
+        bass_rn = _note_to_roman_degree(bass_note, key_str)
+        if bass_rn:
+            return f"{upper_rn}/{bass_rn}"
+        return upper_rn
 
     try:
         from music21 import harmony, key as m21key, roman
@@ -66,6 +77,39 @@ def chord_to_roman(symbol: str, key_str: str) -> str:
     except Exception as exc:
         logger.debug("Roman conversion failed for %r in %r: %s", symbol, key_str, exc)
         return symbol
+
+
+def _note_to_roman_degree(note: str, key_str: str) -> str:
+    """Convert a single note name to its scale-degree numeral (e.g. 'B' in G major → 'III').
+
+    Returns an empty string if conversion fails.
+    """
+    _ROMAN_NUMERALS = ["I", "II", "III", "IV", "V", "VI", "VII"]
+    _NOTE_SEMITONES = {"C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
+                       "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7, "G#": 8,
+                       "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11}
+    try:
+        parts = key_str.strip().split()
+        tonic = parts[0] if parts else "C"
+        tonic_semi = _NOTE_SEMITONES.get(tonic, 0)
+        note_semi = _NOTE_SEMITONES.get(note)
+        if note_semi is None:
+            return ""
+        interval = (note_semi - tonic_semi) % 12
+        # Map semitone interval to diatonic scale degree (major scale intervals)
+        _MAJOR_DEGREES = {0: "I", 2: "II", 4: "III", 5: "IV", 7: "V", 9: "VI", 11: "VII"}
+        # Chromatic degrees get the nearest with accidental
+        degree = _MAJOR_DEGREES.get(interval)
+        if degree:
+            return degree
+        # Use flat/sharp for chromatic notes
+        if interval - 1 in _MAJOR_DEGREES:
+            return f"#{_MAJOR_DEGREES[interval - 1]}"
+        if interval + 1 in _MAJOR_DEGREES:
+            return f"b{_MAJOR_DEGREES[interval + 1]}"
+        return ""
+    except Exception:
+        return ""
 
 
 def measures_to_roman(chord_measures: list, key_str: str) -> list:
