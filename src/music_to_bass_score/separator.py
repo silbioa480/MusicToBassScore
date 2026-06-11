@@ -1,12 +1,17 @@
-"""Bass stem separation using Demucs (htdemucs_ft model)."""
+"""Bass stem separation using Demucs Python API (htdemucs_ft model).
 
-import subprocess
-import sys
+Uses the Python API directly (not subprocess) to avoid ffprobe/libcaca dependency.
+Audio I/O uses soundfile, which supports WAV natively without system codecs.
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .config import DEMUCS_MODEL, STEMS_DIR
+import numpy as np
+import soundfile as sf
+
+from .config import DEMUCS_MODEL, SAMPLE_RATE, STEMS_DIR
 
 
 @dataclass
@@ -22,71 +27,76 @@ def separate_bass(
     device: str = "auto",
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> SeparationResult:
-    """Separate bass stem from full mix using Demucs."""
+    """Separate bass stem from full mix using Demucs Python API."""
+    import torch
+    from demucs.pretrained import get_model
+    from demucs.apply import apply_model
+    import julius
+
     resolved_device = _resolve_device(device)
 
     if progress_cb:
         progress_cb(0.05)
 
-    cmd = [
-        sys.executable, "-m", "demucs",
-        "--two-stems", "bass",
-        "-n", model_name,
-        "-d", resolved_device,
-        "-o", str(output_dir),
-        str(audio_path),
-    ]
+    if progress_cb:
+        progress_cb(0.10)
+    model = get_model(model_name)
+    model.eval()
+    model.to(resolved_device)
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    if progress_cb:
+        progress_cb(0.20)
 
-    stderr_lines = []
-    while True:
-        line = process.stderr.readline() if process.stderr else ""
-        if not line and process.poll() is not None:
-            break
-        if line:
-            stderr_lines.append(line.rstrip())
-            if progress_cb and "%" in line:
-                pct = _parse_progress_pct(line)
-                if pct is not None:
-                    progress_cb(0.05 + pct * 0.9)
+    wav_np, sr = sf.read(str(audio_path), dtype="float32", always_2d=True)
+    wav_np = wav_np.T  # (channels, samples)
 
-    returncode = process.wait()
-    if returncode != 0:
-        error_output = "\n".join(stderr_lines[-20:])
-        raise RuntimeError(
-            f"Demucs failed (exit {returncode}):\n{error_output}"
+    if wav_np.shape[0] == 1:
+        wav_np = np.repeat(wav_np, 2, axis=0)
+
+    wav = torch.from_numpy(wav_np).float()
+
+    if sr != model.samplerate:
+        wav = julius.resample_frac(wav, sr, model.samplerate)
+
+    ref = wav.mean()
+    std = wav.std().clamp(min=1e-8)
+    wav_norm = (wav - ref) / std
+
+    if progress_cb:
+        progress_cb(0.30)
+
+    def _demucs_progress(progress: float) -> None:
+        if progress_cb:
+            progress_cb(0.30 + progress * 0.60)
+
+    with torch.no_grad():
+        sources = apply_model(
+            model,
+            wav_norm.unsqueeze(0).to(resolved_device),
+            device=resolved_device,
+            progress=False,
+            num_workers=0,
         )
+
+    if progress_cb:
+        progress_cb(0.92)
+
+    sources = sources * std + ref
+
+    bass_idx = model.sources.index("bass")
+    bass_wav = sources[0, bass_idx].cpu().numpy()  # (channels, samples)
+
+    stem_dir = output_dir / model_name / audio_path.stem
+    stem_dir.mkdir(parents=True, exist_ok=True)
+    bass_path = stem_dir / "bass.wav"
+
+    bass_wav_T = bass_wav.T  # (samples, channels)
+    sf.write(str(bass_path), bass_wav_T, model.samplerate)
 
     if progress_cb:
         progress_cb(1.0)
 
-    bass_path = _find_bass_output(output_dir, model_name, audio_path.stem)
     return SeparationResult(bass_path=bass_path, stems_dir=output_dir)
-
-
-def _find_bass_output(output_dir: Path, model_name: str, stem: str) -> Path:
-    """Locate the bass.wav file produced by Demucs."""
-    candidates = [
-        output_dir / model_name / stem / "bass.wav",
-        output_dir / model_name / stem / "bass.mp3",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-
-    matches = list(output_dir.rglob("bass.wav"))
-    if matches:
-        return matches[0]
-
-    raise FileNotFoundError(
-        f"Could not find Demucs bass output. Searched under: {output_dir}"
-    )
 
 
 def _resolve_device(device: str) -> str:
@@ -97,14 +107,6 @@ def _resolve_device(device: str) -> str:
         return "cuda" if torch.cuda.is_available() else "cpu"
     except ImportError:
         return "cpu"
-
-
-def _parse_progress_pct(line: str) -> Optional[float]:
-    import re
-    match = re.search(r"(\d+(?:\.\d+)?)\s*%", line)
-    if match:
-        return float(match.group(1)) / 100.0
-    return None
 
 
 def check_model_cached(model_name: str = DEMUCS_MODEL) -> bool:

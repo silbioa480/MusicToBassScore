@@ -48,7 +48,7 @@ def transcribe_bass(
         model_or_model_path=ICASSP_2022_MODEL_PATH,
         onset_threshold=onset_threshold,
         frame_threshold=frame_threshold,
-        minimum_note_duration_s=min_note_duration,
+        minimum_note_length=min_note_duration * 1000,  # seconds → milliseconds
         minimum_frequency=minimum_frequency,
         maximum_frequency=maximum_frequency,
     )
