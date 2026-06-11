@@ -48,6 +48,7 @@ def build_score(
 
     beats_per_measure = analysis.time_signature_num
     seconds_per_beat = 60.0 / analysis.bpm
+    beat_times = analysis.beat_times or []
 
     bass_part = _build_bass_part(
         note_events=note_events,
@@ -55,6 +56,7 @@ def build_score(
         analysis=analysis,
         beats_per_measure=beats_per_measure,
         seconds_per_beat=seconds_per_beat,
+        beat_times=beat_times,
     )
     score.append(bass_part)
 
@@ -64,6 +66,7 @@ def build_score(
             beats_per_measure=beats_per_measure,
             seconds_per_beat=seconds_per_beat,
             analysis=analysis,
+            beat_times=beat_times,
         )
         score.append(tab_part)
 
@@ -76,6 +79,7 @@ def _build_bass_part(
     analysis: AudioAnalysis,
     beats_per_measure: int,
     seconds_per_beat: float,
+    beat_times: list[float],
 ) -> stream.Part:
     part = stream.Part(id="bass")
     part.partName = "Bass Guitar"
@@ -94,7 +98,7 @@ def _build_bass_part(
     part.insert(0, mm)
 
     notes_by_measure = _group_notes_by_measure(
-        note_events, seconds_per_beat, beats_per_measure
+        note_events, seconds_per_beat, beats_per_measure, beat_times
     )
 
     n_measures = max(
@@ -133,6 +137,7 @@ def _build_tab_part(
     beats_per_measure: int,
     seconds_per_beat: float,
     analysis: AudioAnalysis,
+    beat_times: list[float],
 ) -> stream.Part:
     """Build a simplified TAB representation as a second part."""
     from music21 import tablature
@@ -152,7 +157,7 @@ def _build_tab_part(
     part.append(time_sig)
 
     notes_by_measure = _group_notes_by_measure(
-        note_events, seconds_per_beat, beats_per_measure
+        note_events, seconds_per_beat, beats_per_measure, beat_times
     )
 
     n_measures = max(notes_by_measure.keys()) + 1 if notes_by_measure else 1
@@ -187,9 +192,59 @@ def _group_notes_by_measure(
     note_events: list[NoteEvent],
     seconds_per_beat: float,
     beats_per_measure: int,
+    beat_times: Optional[list[float]] = None,
 ) -> dict[int, list[m21note.Note]]:
-    """Convert NoteEvents to music21 Notes grouped by measure index."""
-    from music21 import pitch as m21pitch, duration as m21duration
+    """Convert NoteEvents to music21 Notes grouped by measure index.
+
+    When beat_times is provided, uses actual beat positions (from librosa beat tracker)
+    to map notes to measures — eliminates drift from BPM estimation error and pickup measures.
+    Falls back to fixed BPM arithmetic when beat_times is unavailable.
+    """
+    if beat_times and len(beat_times) >= beats_per_measure:
+        return _group_by_beat_times(note_events, beat_times, beats_per_measure, seconds_per_beat)
+    return _group_by_fixed_bpm(note_events, seconds_per_beat, beats_per_measure)
+
+
+def _group_by_beat_times(
+    note_events: list[NoteEvent],
+    beat_times: list[float],
+    beats_per_measure: int,
+    seconds_per_beat: float,
+) -> dict[int, list[m21note.Note]]:
+    import numpy as np
+    from music21 import pitch as m21pitch
+
+    measure_starts = np.array(beat_times[::beats_per_measure])
+    groups: dict[int, list[m21note.Note]] = {}
+
+    for event in note_events:
+        midi_pitch = event.pitch
+        if not (BASS_MIDI_MIN <= midi_pitch <= BASS_MIDI_MAX):
+            continue
+
+        m_idx = max(0, int(np.searchsorted(measure_starts, event.start_sec, side='right')) - 1)
+        measure_start_t = float(measure_starts[m_idx])
+
+        beat_in_measure = _quantize((event.start_sec - measure_start_t) / seconds_per_beat)
+        beat_in_measure = max(0.0, beat_in_measure)
+        dur_beats = _quantize(max(0.125, (event.end_sec - event.start_sec) / seconds_per_beat))
+
+        n = m21note.Note()
+        n.pitch = m21pitch.Pitch(midi=midi_pitch)
+        n.quarterLength = dur_beats
+        n.offset = beat_in_measure
+
+        groups.setdefault(m_idx, []).append(n)
+
+    return groups
+
+
+def _group_by_fixed_bpm(
+    note_events: list[NoteEvent],
+    seconds_per_beat: float,
+    beats_per_measure: int,
+) -> dict[int, list[m21note.Note]]:
+    from music21 import pitch as m21pitch
 
     groups: dict[int, list[m21note.Note]] = {}
 
@@ -198,11 +253,8 @@ def _group_notes_by_measure(
         if not (BASS_MIDI_MIN <= midi_pitch <= BASS_MIDI_MAX):
             continue
 
-        start_beat = event.start_sec / seconds_per_beat
-        dur_beats = max(0.125, (event.end_sec - event.start_sec) / seconds_per_beat)
-
-        dur_beats = _quantize(dur_beats)
-        start_beat = _quantize(start_beat)
+        start_beat = _quantize(event.start_sec / seconds_per_beat)
+        dur_beats = _quantize(max(0.125, (event.end_sec - event.start_sec) / seconds_per_beat))
 
         measure_idx = int(start_beat // beats_per_measure)
         beat_in_measure = start_beat % beats_per_measure

@@ -167,6 +167,7 @@ def _run_from_metadata(
         audio_path=song_metadata.audio_path,
         bpm=analysis.bpm,
         time_sig_num=analysis.time_signature_num,
+        beat_times=analysis.beat_times,
     )
 
     cb("악보 생성 중...", 0.88)

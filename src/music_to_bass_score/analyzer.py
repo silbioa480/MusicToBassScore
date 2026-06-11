@@ -1,6 +1,6 @@
 """Audio analysis: BPM, key, time signature using librosa."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +29,7 @@ class AudioAnalysis:
     time_signature_den: int
     duration_sec: float
     sample_rate: int
+    beat_times: list[float] = field(default_factory=list)
 
 
 def analyze_audio(audio_path: Path) -> AudioAnalysis:
@@ -38,13 +39,17 @@ def analyze_audio(audio_path: Path) -> AudioAnalysis:
         y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
         duration = librosa.get_duration(y=y, sr=sr)
 
-        bpm = _estimate_bpm(y, sr)
+        bpm, beat_frames = _estimate_bpm_and_beats(y, sr)
+        beat_times = librosa.frames_to_time(
+            beat_frames, sr=sr, hop_length=HOP_LENGTH
+        ).tolist()
         key = _estimate_key(y, sr)
         time_sig_num, time_sig_den = _estimate_time_signature(y, sr, bpm)
 
         logger.info(
-            "Analysis done: bpm=%.1f key=%r time_sig=%d/%d duration=%.1fs",
+            "Analysis done: bpm=%.1f key=%r time_sig=%d/%d duration=%.1fs beats=%d first_beat=%.3fs",
             bpm, key, time_sig_num, time_sig_den, duration,
+            len(beat_times), beat_times[0] if beat_times else 0.0,
         )
         return AudioAnalysis(
             bpm=bpm,
@@ -54,17 +59,18 @@ def analyze_audio(audio_path: Path) -> AudioAnalysis:
             time_signature_den=time_sig_den,
             duration_sec=duration,
             sample_rate=sr,
+            beat_times=beat_times,
         )
     except Exception as exc:
         logger.error("Audio analysis failed: %s", exc, exc_info=True)
         raise
 
 
-def _estimate_bpm(y: np.ndarray, sr: int) -> float:
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr, hop_length=HOP_LENGTH)
+def _estimate_bpm_and_beats(y: np.ndarray, sr: int) -> tuple[float, np.ndarray]:
+    tempo, beats = librosa.beat.beat_track(y=y, sr=sr, hop_length=HOP_LENGTH)
     if isinstance(tempo, np.ndarray):
         tempo = float(tempo[0]) if len(tempo) > 0 else 120.0
-    return float(tempo)
+    return float(tempo), beats
 
 
 def _estimate_key(y: np.ndarray, sr: int) -> str:
