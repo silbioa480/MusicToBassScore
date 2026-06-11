@@ -348,9 +348,9 @@ tabNotes = {{
 # ── Chord-chart builder (banded row box: one box per row, measures split by bars) ──
 
 _MEASURES_PER_LINE = 4
-# 22 staff-spaces per cell keeps 4 cells inside A4 (186 mm text area, ≈1.76 mm/ss)
-# 4×22 + 3×0.8 (inner vbars) + 0.8 (\pad-markup) + 7 (leading) ≈ 100 ss ≈ 176 mm ✓
-_CELL_WIDTH = 22
+# 21 staff-spaces per cell. Combined with set-global-staff-size 17 (below), 4 cells +
+# inner dividers always fit inside A4's 186 mm text area even with long two-degree cells.
+_CELL_WIDTH = 21
 
 
 def _measure_cell_parts(measure) -> tuple[str, str]:
@@ -431,11 +431,15 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
         chord_line = ' \\hspace #0.4 ' + barspace.join(c for c, _ in row) + ' \\hspace #0.4 '
         # Degree strip: only INNER dividers between measures; no outer bars.
         deg_strip = vbar.join(d for _, d in row)
+        # \pad-to-box reserves vertical space (Y -0.5..2.5) OUTSIDE the rounded-box
+        # outline so its top/bottom border is never clipped by the system boundary.
+        # X padding is 0 so horizontal width is unaffected.
         rows.append(
-            '\\markup \\vspace #0.8\n'
-            '\\markup \\line { \\hspace #4 \\center-column { '
+            '\\markup \\vspace #1.0\n'
+            '\\markup \\line { \\hspace #1 \\center-column { '
             f'\\line {{ {chord_line} }} '
-            f'\\rounded-box \\pad-markup #0.4 \\line {{ {deg_strip} }} '
+            '\\rounded-box \\pad-to-box #\'(0 . 0) #\'(-0.5 . 2.5) '
+            f'\\line {{ {deg_strip} }} '
             '} }'
         )
     body = "\n".join(rows)
@@ -444,6 +448,8 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
 
     return f'''\\version "2.24.0"
 \\language "english"
+
+#(set-global-staff-size 17)
 
 \\header {{
   title = "{title}"
