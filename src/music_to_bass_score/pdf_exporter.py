@@ -357,11 +357,39 @@ _CELL_WIDTH = 24
 _ROW_PAD = 2.2
 
 
-def _measure_cell_parts(measure) -> tuple[str, str]:
+def _combine_markups(parts: list[str]) -> str:
+    """Overlay several markups at a shared origin via nested binary \\combine."""
+    if len(parts) == 1:
+        return parts[0]
+    return '\\combine ' + parts[0] + ' ' + _combine_markups(parts[1:])
+
+
+def _positioned_cell(items: list[tuple[float, str]], beats: int) -> str:
+    """Lay chords/degrees inside a fixed-width cell at their beat positions.
+
+    A single chord is centred. With multiple chords each is left-anchored at its beat
+    fraction (offset/beats × cell width) — so the first chord starts at the cell's left
+    edge and a second chord at beat (beats/2) begins at the cell's centre. `items` are
+    already-wrapped markup strings (e.g. '"Em7"' or '\\bold "vi7"').
+    """
+    w = _CELL_WIDTH
+    if not items:
+        return f'\\hcenter-in #{w} \\transparent "x"'
+    if len(items) == 1:
+        return f'\\hcenter-in #{w} {items[0][1]}'
+    # Strut sets the cell width; each item is translated to its beat-fraction x.
+    parts = [f'\\hspace #{w}']
+    for off, markup in items:
+        x = max(0.0, min(w, (off / beats) * w))
+        parts.append(f"\\translate #'({x:.2f} . 0) {markup}")
+    return _combine_markups(parts)
+
+
+def _measure_cell_parts(measure, beats: int) -> tuple[str, str]:
     """Return (chord_markup, degree_markup) for one measure, each a fixed-width cell.
 
     Repeated chords are already collapsed upstream, so each measure carries only its
-    actual chord changes (1..N), laid left→right inside the cell.
+    actual chord changes (1..N), placed at their beat positions within the cell.
     """
     above: list[tuple[float, str]] = []
     below: dict[float, str] = {}
@@ -374,17 +402,13 @@ def _measure_cell_parts(measure) -> tuple[str, str]:
             above.append((off, te.content))
     above.sort(key=lambda x: x[0])
 
-    if not above:
-        chord_inner = '\\transparent "x"'
-        deg_inner = '\\transparent "x"'
-    else:
-        chord_inner = '\\line { ' + '  '.join(f'"{_esc(sym)}"' for _, sym in above) + ' }'
-        deg_inner = '\\line { ' + '  '.join(
-            f'\\bold "{_esc(below.get(off, ""))}"' for off, _ in above
-        ) + ' }'
+    chord_items = [(off, f'"{_esc(sym)}"') for off, sym in above]
+    # \large \bold per item (NOT around the whole cell, which would scale the width strut
+    # and break alignment with the chord row above).
+    deg_items = [(off, f'\\large \\bold "{_esc(below.get(off, ""))}"') for off, _ in above]
 
-    chord_cell = f'\\hcenter-in #{_CELL_WIDTH} {chord_inner}'
-    deg_cell = f'\\hcenter-in #{_CELL_WIDTH} \\large {deg_inner}'
+    chord_cell = _positioned_cell(chord_items, beats)
+    deg_cell = _positioned_cell(deg_items, beats)
     return chord_cell, deg_cell
 
 
@@ -415,7 +439,7 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
     bpm = int(round(mm[0].number)) if mm else 120
 
     measures = list(part.getElementsByClass('Measure'))
-    cells = [_measure_cell_parts(m) for m in measures]
+    cells = [_measure_cell_parts(m, beats) for m in measures]
 
     # Internal measure-divider: \filled-box reports its extent to LilyPond so
     # \rounded-box can compute the correct box height (unlike \draw-line which has
@@ -447,12 +471,16 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
         # Degree strip: only real cells with INNER dividers (no outer bars). A trailing
         # \hspace pads the box line out to a full row's width, keeping the box on the left.
         deg_strip = vbar.join(d for _, d in row)
-        # \pad-around #0.5 reserves space OUTSIDE the rounded-box outline (incl. rounded
-        # corners) so the top/bottom border is never clipped. \pad-to-box INSIDE keeps a
-        # consistent box height across rows.
+        # Box geometry:
+        #  - box-padding #0.7 gives generous clearance between the text and the border
+        #    on all sides (an earlier \pad-to-box approach mis-sized the box and clipped
+        #    the text tops — this overrides the border padding directly instead).
+        #  - a transparent strut (\with-dimensions … \null) fixes the line's vertical
+        #    extent so every box is the same height regardless of its glyphs.
+        strut = "\\with-dimensions #'(0 . 0) #'(-0.55 . 2.35) \\null"
         box = (
-            '\\pad-around #0.5 \\rounded-box \\pad-to-box #\'(0 . 0) #\'(-0.3 . 2.1) '
-            f'\\line {{ {deg_strip} }}'
+            "\\override #'(box-padding . 0.7) \\rounded-box "
+            f"\\line {{ {strut} {deg_strip} }}"
         )
         if missing:
             box_line = f'\\line {{ {box} \\hspace #{missing * cell_advance:.2f} }}'
