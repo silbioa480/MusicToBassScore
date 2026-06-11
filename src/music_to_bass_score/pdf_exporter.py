@@ -431,14 +431,15 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
         chord_line = ' \\hspace #0.4 ' + barspace.join(c for c, _ in row) + ' \\hspace #0.4 '
         # Degree strip: only INNER dividers between measures; no outer bars.
         deg_strip = vbar.join(d for _, d in row)
-        # \pad-to-box reserves vertical space (Y -0.5..2.5) OUTSIDE the rounded-box
-        # outline so its top/bottom border is never clipped by the system boundary.
-        # X padding is 0 so horizontal width is unaffected.
+        # \pad-around #0.4 reserves space OUTSIDE the rounded-box outline (including
+        # its rounded corners) so the top/bottom border is never clipped by the chord
+        # line above or the system boundary. \pad-to-box INSIDE keeps a consistent box
+        # height across rows. \fill-line centers the whole block horizontally on the page.
         rows.append(
-            '\\markup \\vspace #1.0\n'
-            '\\markup \\line { \\hspace #1 \\center-column { '
+            '\\markup \\vspace #0.8\n'
+            '\\markup \\fill-line { \\center-column { '
             f'\\line {{ {chord_line} }} '
-            '\\rounded-box \\pad-to-box #\'(0 . 0) #\'(-0.5 . 2.5) '
+            '\\pad-around #0.4 \\rounded-box \\pad-to-box #\'(0 . 0) #\'(-0.3 . 2.1) '
             f'\\line {{ {deg_strip} }} '
             '} }'
         )
