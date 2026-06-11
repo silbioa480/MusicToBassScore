@@ -1,20 +1,23 @@
-"""Per-measure chord detection: BTC Transformer + bass-slash annotation.
+"""Per-measure chord detection: BTC Transformer + inversion-slash annotation.
 
 Primary engine: BTC large-voca Transformer on the full mix.
 
-Post-processing — slash bass:
-  Independently detect the dominant bass note from a C2-C4 chroma (<262 Hz).
-  When the bass note differs from the chord root, append it as a slash:
-  "G/B", "Am7/E", "C/G", etc.  This makes walking-bass and inversion voicings
-  explicit on the chart (e.g. C-G/B-Am-G descending bass line).
+Harmonic rhythm: adaptive — 1 chord per measure by default; 2 chords only when
+  BTC shows a genuine mid-measure change (second chord covers ≥40% of the
+  measure AND represents >50% of the underlying BTC segment's duration).
 
-Note on treble-based root correction:
-  Experiments showed that bass-guitar harmonics reach into the C5+ range
-  (D2's 8th harmonic = D5 at 588 Hz > C5 = 523 Hz), so frequency filtering
-  cannot reliably separate bass from upper-voice chroma.  Treble-root override
-  was therefore removed — it introduced false corrections on correctly-identified
-  root-position chords (C → G) without fixing bass-contaminated labels (D → A).
-  Proper source separation (Demucs) would solve this but is too slow on CPU.
+Post-processing — inversion slash:
+  Independently detect the dominant bass note from a C2-C4 chroma (<262 Hz).
+  Slash notation is appended ONLY when ALL of the following hold:
+  (a) bass confidence > 0.88 (suppresses noise/blips),
+  (b) bass note differs from the chord root,
+  (c) bass note IS a chord tone (3rd, 5th, 7th …) — e.g. G/B (B∈G major ✓)
+      but NOT Am/G (G∉Am ✗). This prevents spurious "wrong root" slashes.
+
+BTC limitation: bass-guitar fundamentals (e.g. D2) contaminate the full-mix
+  CQT, causing BTC to occasionally label A/Am as D in heavily bass-driven
+  sections. This cannot be resolved without source separation (Demucs times
+  out on CPU).
 
 Falls back to the librosa chroma matcher if BTC is unavailable or errors.
 """
@@ -92,13 +95,21 @@ def detect_chords_per_measure(
 # BTC path
 # ---------------------------------------------------------------------------
 
+# Fraction of a measure the second chord must cover to be treated as a genuine
+# mid-measure change (vs. a blip at the measure boundary).
+_MIN_SECOND_CHORD_MEASURE_FRAC = 0.40
+# The second chord's overlap with [half-measure, end) must exceed this fraction
+# of the underlying BTC segment's total duration (filters bleed-in from next measure).
+_MIN_SECOND_CHORD_SEG_FRAC = 0.50
+
+
 def _chords_from_btc(
     audio_path: Path,
     measure_grid: list[float],
     time_sig_num: int,
     bpm: float,
 ) -> list[list[tuple[float, str]]]:
-    """Map the BTC chord timeline onto half-measure windows, then add bass-slash."""
+    """Map the BTC chord timeline adaptively, then add inversion-slash notation."""
     from . import btc_chord
 
     logger.info(
@@ -106,23 +117,11 @@ def _chords_from_btc(
         audio_path, bpm, time_sig_num, len(measure_grid),
     )
     timeline = btc_chord.recognize_chords(audio_path)
-    seconds_per_measure = (60.0 / bpm) * time_sig_num
-    segs = _measure_segments(time_sig_num)
-
-    # Build per-segment raw chords from BTC overlap voting
-    raw_segs: list[tuple[float, float, str]] = []
-    for m_start in measure_grid:
-        for s_frac, e_frac in segs:
-            ws = m_start + s_frac * seconds_per_measure
-            we = m_start + e_frac * seconds_per_measure
-            chord = btc_chord.chord_at_window(timeline, ws, we)
-            raw_segs.append((ws, we, chord))
+    spm = (60.0 / bpm) * time_sig_num  # seconds per measure
 
     # Load audio once for bass detection
     y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
     y_h = librosa.effects.harmonic(y, margin=4.0)
-
-    # Bass chroma: C2-C4 (<262 Hz) — fundamental register of bass guitar
     bass_ch = librosa.feature.chroma_cqt(
         y=y_h, sr=sr, hop_length=HOP_LENGTH,
         fmin=librosa.note_to_hz("C2"), n_octaves=2,
@@ -131,23 +130,41 @@ def _chords_from_btc(
         np.arange(bass_ch.shape[1]), sr=sr, hop_length=HOP_LENGTH
     )
 
-    corrected: list[tuple[float, float, str]] = []
-    for ws, we, chord in raw_segs:
-        chord = _apply_slash_bass(chord, bass_ch, times, ws, we)
-        corrected.append((ws, we, chord))
-
-    # Re-group into per-measure lists
-    n_segs = len(segs)
     measures: list[list[tuple[float, str]]] = []
-    for m_idx, m_start in enumerate(measure_grid):
+    for m_start in measure_grid:
+        m_end = m_start + spm
+        mid = m_start + spm / 2.0
+
+        dom = btc_chord.chord_at_window(timeline, m_start, m_end)
+        c1 = btc_chord.chord_at_window(timeline, m_start, mid)
+        c2 = btc_chord.chord_at_window(timeline, mid, m_end)
+
+        if c1 != c2:
+            # Check if the second chord is a genuine mid-measure change:
+            # its overlap with [mid, m_end) must be >= _MIN_SECOND_CHORD_MEASURE_FRAC × spm
+            # AND represent >= _MIN_SECOND_CHORD_SEG_FRAC of its full BTC-segment duration.
+            seg_overlap = _segment_coverage_in_window(timeline, c2, mid, m_end)
+            c2_seg_dur = _segment_total_duration(timeline, c2, mid, m_end)
+            genuine = (
+                seg_overlap >= _MIN_SECOND_CHORD_MEASURE_FRAC * spm
+                and (c2_seg_dur <= 0 or seg_overlap / c2_seg_dur >= _MIN_SECOND_CHORD_SEG_FRAC)
+            )
+        else:
+            genuine = False
+
+        if genuine:
+            beat_half = float(time_sig_num) / 2.0
+            raw = [(0.0, c1), (beat_half, c2)]
+        else:
+            raw = [(0.0, dom)]
+
+        # Apply inversion-slash annotation to each chord in this measure
         seg_list = []
-        for s_idx, (s_frac, _) in enumerate(segs):
-            flat_idx = m_idx * n_segs + s_idx
-            if flat_idx >= len(corrected):
-                break
-            _ws, _we, chord = corrected[flat_idx]
-            beat_offset = s_frac * time_sig_num
-            seg_list.append((beat_offset, chord))
+        for beat_off, chord in raw:
+            t0 = m_start + (beat_off / time_sig_num) * spm
+            t1 = m_start + ((beat_off / time_sig_num) + 0.5) * spm
+            chord = _apply_slash_bass(chord, bass_ch, times, t0, t1)
+            seg_list.append((beat_off, chord))
         measures.append(seg_list)
 
     measures = _smooth_chord_sequence(measures)
@@ -156,13 +173,43 @@ def _chords_from_btc(
     return measures
 
 
+def _segment_coverage_in_window(
+    timeline: list[tuple[float, float, str]], sym: str, t0: float, t1: float
+) -> float:
+    """Total seconds that BTC segments with label `sym` overlap [t0, t1)."""
+    total = 0.0
+    for s, e, c in timeline:
+        if c == sym:
+            total += max(0.0, min(t1, e) - max(t0, s))
+    return total
+
+
+def _segment_total_duration(
+    timeline: list[tuple[float, float, str]], sym: str, t0: float, t1: float
+) -> float:
+    """Duration of the BTC segment for `sym` that overlaps [t0, t1) the most."""
+    best_overlap, best_dur = 0.0, 0.0
+    for s, e, c in timeline:
+        if c == sym:
+            overlap = max(0.0, min(t1, e) - max(t0, s))
+            if overlap > best_overlap:
+                best_overlap, best_dur = overlap, e - s
+    return best_dur
+
+
 def _chord_root(symbol: str) -> str:
-    """Extract root note name from a chord symbol (handles '#' accidentals)."""
+    """Extract root note name from a chord symbol (handles '#'/'b' accidentals)."""
     if not symbol or symbol in ("N.C.", "NC"):
         return ""
     if len(symbol) > 1 and symbol[1] in ("#", "b"):
         return symbol[:2]
     return symbol[:1]
+
+
+def _chord_quality(symbol: str) -> str:
+    """Extract the quality suffix after the root (e.g. 'Cm7' → 'm7', 'G' → '')."""
+    root = _chord_root(symbol)
+    return symbol[len(root):]
 
 
 def _chroma_window(ch: np.ndarray, times: np.ndarray, t0: float, t1: float) -> np.ndarray:
@@ -177,23 +224,43 @@ def _chroma_window(ch: np.ndarray, times: np.ndarray, t0: float, t1: float) -> n
     return vec / mx
 
 
-# Minimum confidence for bass note (normalised 0-1) to trigger slash notation.
-# Set conservatively to avoid noise-induced slashes on ambiguous segments.
-_BASS_MIN_CONFIDENCE = 0.72
+# Chord tone intervals (semitones above root) for each quality suffix.
+_CHORD_TONE_INTERVALS: dict[str, set[int]] = {
+    "":      {0, 4, 7},
+    "m":     {0, 3, 7},
+    "7":     {0, 4, 7, 10},
+    "m7":    {0, 3, 7, 10},
+    "maj7":  {0, 4, 7, 11},
+    "dim":   {0, 3, 6},
+    "dim7":  {0, 3, 6, 9},
+    "m7b5":  {0, 3, 6, 10},
+    "+":     {0, 4, 8},
+    "sus4":  {0, 5, 7},
+    "sus2":  {0, 2, 7},
+    "6":     {0, 4, 7, 9},
+    "m6":    {0, 3, 7, 9},
+    "mM7":   {0, 3, 7, 11},
+}
+
+# Bass confidence must exceed this threshold AND bass must be a chord tone.
+_BASS_CHORD_TONE_CONFIDENCE = 0.88
 
 
 def _apply_slash_bass(
     chord: str, bass_ch: np.ndarray, times: np.ndarray, t0: float, t1: float
 ) -> str:
-    """Append a slash-bass note when the dominant bass note differs from the chord root.
+    """Append slash-bass only for clear inversions (bass is a chord tone, high confidence).
 
-    Uses C2-C4 chroma (fundamental register of bass guitar). Only appends when the
-    bass note confidence exceeds _BASS_MIN_CONFIDENCE to suppress noisy segments.
+    Conditions (all must hold):
+      1. bass confidence > _BASS_CHORD_TONE_CONFIDENCE  (blip suppression)
+      2. bass note ≠ chord root
+      3. bass note IS in the chord's tone set (3rd, 5th, 7th …)
     """
     if chord in ("N.C.", "NC"):
         return chord
 
-    chord_root = _chord_root(chord.split("/")[0])
+    upper = chord.split("/")[0]
+    chord_root = _chord_root(upper)
     if not chord_root:
         return chord
 
@@ -202,10 +269,33 @@ def _apply_slash_bass(
     bass_conf = float(bass_vec[bass_idx])
     bass_note = _NOTE_NAMES[bass_idx]
 
-    if bass_conf < _BASS_MIN_CONFIDENCE or bass_note == chord_root:
+    if bass_conf < _BASS_CHORD_TONE_CONFIDENCE:
+        return chord
+    if bass_note == chord_root:
         return chord
 
-    return f"{chord}/{bass_note}"
+    # Check bass note is a chord tone
+    quality = _chord_quality(upper)
+    intervals = _CHORD_TONE_INTERVALS.get(quality)
+    if intervals is None:
+        return chord  # unknown quality — skip slash
+
+    root_semi = _NOTE_SEMITONES.get(chord_root)
+    bass_semi = _NOTE_SEMITONES.get(bass_note)
+    if root_semi is None or bass_semi is None:
+        return chord
+
+    if (bass_semi - root_semi) % 12 not in intervals:
+        return chord  # not a chord tone
+
+    return f"{upper}/{bass_note}"
+
+
+_NOTE_SEMITONES = {
+    "C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
+    "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7, "G#": 8,
+    "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11,
+}
 
 
 # ---------------------------------------------------------------------------
