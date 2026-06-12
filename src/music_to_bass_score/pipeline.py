@@ -180,14 +180,25 @@ def _run_from_metadata(
         bass_stem_path=bass_stem_path,          # clean bass for inversion-slash
     )
 
-    # Drop leading N.C.-only measures (silent or pre-music intro).
+    # Drop leading and trailing N.C.-only measures (silent intro / outro).
+    def _is_nc(m: list) -> bool:
+        return all(c == "N.C." for _, c in m)
+
     leading_nc = next(
-        (i for i, m in enumerate(chord_labels) if any(c != "N.C." for _, c in m)),
+        (i for i, m in enumerate(chord_labels) if not _is_nc(m)),
         len(chord_labels),
     )
     if leading_nc:
         logger.info("Trimming %d leading N.C. measures (silent intro)", leading_nc)
         chord_labels = chord_labels[leading_nc:]
+
+    trailing_nc = next(
+        (i for i, m in enumerate(reversed(chord_labels)) if not _is_nc(m)),
+        len(chord_labels),
+    )
+    if trailing_nc:
+        logger.info("Trimming %d trailing N.C. measures (silent outro)", trailing_nc)
+        chord_labels = chord_labels[: len(chord_labels) - trailing_nc]
 
     cb("도수 분석 중...", 0.70)
     roman_labels = measures_to_roman(chord_labels, analysis.key)
