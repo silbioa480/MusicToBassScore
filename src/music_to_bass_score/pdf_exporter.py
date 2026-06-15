@@ -391,19 +391,36 @@ def _measure_cell_parts(measure, beats: int) -> tuple[str, str]:
 
     Repeated chords are already collapsed upstream, so each measure carries only its
     actual chord changes (1..N), placed at their beat positions within the cell.
+    TextExpression items whose content starts with "[Key:" are treated as key-change
+    markers and rendered as a small bold prefix before the first chord in the cell.
     """
+    key_marker: str | None = None
     above: list[tuple[float, str]] = []
     below: dict[float, str] = {}
     for te in measure.getElementsByClass('TextExpression'):
         off = _q(float(te.offset))
         place = getattr(te, 'placement', 'above') or 'above'
-        if place == 'below':
+        if te.content.startswith("[Key:"):
+            key_marker = te.content
+        elif place == 'below':
             below[off] = te.content
         else:
             above.append((off, te.content))
     above.sort(key=lambda x: x[0])
 
-    chord_items = [(off, f'"{_esc(sym)}"') for off, sym in above]
+    if key_marker and above:
+        # Prepend key-change marker as smaller bold text before the first chord symbol.
+        first_off, first_sym = above[0]
+        km_mu = f'\\fontsize #-3 \\bold "{_esc(key_marker)}"'
+        first_mu = f'\\line {{ {km_mu} \\hspace #0.4 "{_esc(first_sym)}" }}'
+        chord_items = [(first_off, first_mu)] + [
+            (off, f'"{_esc(sym)}"') for off, sym in above[1:]
+        ]
+    elif key_marker:
+        chord_items = [(0.0, f'\\fontsize #-3 \\bold "{_esc(key_marker)}"')]
+    else:
+        chord_items = [(off, f'"{_esc(sym)}"') for off, sym in above]
+
     # \large \bold per item (NOT around the whole cell, which would scale the width strut
     # and break alignment with the chord row above).
     deg_items = [(off, f'\\large \\bold "{_esc(below.get(off, ""))}"') for off, _ in above]

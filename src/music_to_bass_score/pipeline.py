@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
-from .analyzer import AudioAnalysis, analyze_audio, build_measure_grid, detect_first_onset
+from .analyzer import AudioAnalysis, analyze_audio, build_measure_grid, detect_first_onset, detect_key_per_section
 from .chord_detector import detect_chords_per_measure
 from .config import AUDIO_DIR, MIDI_DIR, SAMPLE_RATE, SCORES_DIR, STEMS_DIR
 from .downloader import SongMetadata, download_audio
@@ -26,6 +26,7 @@ class PipelineResult:
     analysis: AudioAnalysis
     chord_labels: list
     roman_labels: list
+    key_labels: list
     export: ExportResult
 
 
@@ -163,6 +164,14 @@ def _run_from_metadata(
     )
     logger.info("Measure grid: anchor=%.3fs, %d measures", anchor, len(measure_grid))
 
+    # Per-section key detection for modulating songs.
+    cb("조표 분석 중...", 0.35)
+    key_labels = detect_key_per_section(
+        song_metadata.audio_path,
+        measure_grid,
+        initial_key=analysis.key,
+    )
+
     # Demucs bass separation → clean bass line for accurate inversion-slash notation.
     # Optional: on failure the chord detector falls back to a full-mix low chroma.
     cb("베이스 분리 중... (수 분 소요)", 0.40)
@@ -181,6 +190,7 @@ def _run_from_metadata(
     )
 
     # Drop leading and trailing N.C.-only measures (silent intro / outro).
+    # key_labels is trimmed with the same indices so they stay in sync.
     def _is_nc(m: list) -> bool:
         return all(c == "N.C." for _, c in m)
 
@@ -191,6 +201,7 @@ def _run_from_metadata(
     if leading_nc:
         logger.info("Trimming %d leading N.C. measures (silent intro)", leading_nc)
         chord_labels = chord_labels[leading_nc:]
+        key_labels = key_labels[leading_nc:]
 
     trailing_nc = next(
         (i for i, m in enumerate(reversed(chord_labels)) if not _is_nc(m)),
@@ -199,9 +210,10 @@ def _run_from_metadata(
     if trailing_nc:
         logger.info("Trimming %d trailing N.C. measures (silent outro)", trailing_nc)
         chord_labels = chord_labels[: len(chord_labels) - trailing_nc]
+        key_labels = key_labels[: len(key_labels) - trailing_nc]
 
     cb("도수 분석 중...", 0.70)
-    roman_labels = measures_to_roman(chord_labels, analysis.key)
+    roman_labels = measures_to_roman(chord_labels, key_labels)
     logger.info("Roman degrees (first 6): %s", roman_labels[:6])
 
     cb("악보 생성 중...", 0.85)
@@ -210,6 +222,7 @@ def _run_from_metadata(
         analysis=analysis,
         chord_labels=chord_labels,
         roman_labels=roman_labels,
+        key_labels=key_labels,
     )
 
     cb("PDF 렌더링 중...", 0.95)
@@ -232,6 +245,7 @@ def _run_from_metadata(
         analysis=analysis,
         chord_labels=chord_labels,
         roman_labels=roman_labels,
+        key_labels=key_labels,
         export=export,
     )
 

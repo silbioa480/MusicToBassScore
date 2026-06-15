@@ -167,29 +167,114 @@ def _correct_tempo_octave(tempo_bt: float, y: np.ndarray, sr: int) -> float:
     return corrected
 
 
-def _estimate_key(y: np.ndarray, sr: int) -> str:
-    chroma = librosa.feature.chroma_cqt(
-        y=y, sr=sr, hop_length=HOP_LENGTH, n_chroma=12
-    )
-    mean_chroma = chroma.mean(axis=1)
-
+def _score_key(chroma_vec: np.ndarray) -> str:
+    """Return best-fit key string for a 12-element mean chroma vector."""
     best_score = -np.inf
     best_key = "C major"
-
     for root_idx in range(12):
-        rotated = np.roll(mean_chroma, -root_idx)
-
+        rotated = np.roll(chroma_vec, -root_idx)
         major_score = float(np.corrcoef(rotated, MAJOR_PROFILE)[0, 1])
         if major_score > best_score:
             best_score = major_score
             best_key = f"{KEY_NAMES[root_idx]} major"
-
         minor_score = float(np.corrcoef(rotated, MINOR_PROFILE)[0, 1])
         if minor_score > best_score:
             best_score = minor_score
             best_key = f"{KEY_NAMES[root_idx]} minor"
-
     return best_key
+
+
+def _estimate_key(y: np.ndarray, sr: int) -> str:
+    chroma = librosa.feature.chroma_cqt(
+        y=y, sr=sr, hop_length=HOP_LENGTH, n_chroma=12
+    )
+    return _score_key(chroma.mean(axis=1))
+
+
+def detect_key_per_section(
+    audio_path: Path,
+    measure_grid: list[float],
+    section_measures: int = 8,
+    stride_measures: int = 2,
+    min_stable: int = 4,
+    initial_key: Optional[str] = None,
+) -> list[str]:
+    """Detect key modulations by sliding-window chroma analysis.
+
+    Returns one key string per measure (same length as measure_grid).
+    A new key is only accepted after min_stable consecutive measures
+    agree on it, preventing noisy short-region flips.
+
+    initial_key seeds the stability filter with the known global key so that
+    a short ambiguous intro does not get mislabelled before the song settles.
+    """
+    from collections import Counter
+
+    n = len(measure_grid)
+    if n == 0:
+        return []
+
+    y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=HOP_LENGTH, n_chroma=12)
+    total_frames = chroma.shape[1]
+
+    measure_frames = [min(int(t * sr / HOP_LENGTH), total_frames) for t in measure_grid]
+
+    # Each measure collects candidate key votes from all windows covering it.
+    votes: list[list[str]] = [[] for _ in range(n)]
+    for w_start in range(0, n, stride_measures):
+        w_end = min(w_start + section_measures, n)
+        f_start = measure_frames[w_start]
+        f_end = measure_frames[w_end] if w_end < n else total_frames
+        if f_end <= f_start:
+            continue
+        candidate = _score_key(chroma[:, f_start:f_end].mean(axis=1))
+        for m_idx in range(w_start, w_end):
+            votes[m_idx].append(candidate)
+
+    # Majority vote per measure.
+    raw_keys = [
+        Counter(v).most_common(1)[0][0] if v else "C major"
+        for v in votes
+    ]
+
+    # Stability filter: require min_stable consecutive measures before switching key.
+    # Seed from the global key when available — prevents short ambiguous intros from
+    # being mislabelled before the song's harmonic context is fully established.
+    current = initial_key if initial_key else raw_keys[0]
+    stable: list[str] = [current]
+    pending: Optional[str] = None
+    pending_count = 0
+    for k in raw_keys[1:]:
+        if k == current:
+            pending = None
+            pending_count = 0
+            stable.append(current)
+        elif k == pending:
+            pending_count += 1
+            if pending_count >= min_stable:
+                current = k
+                pending = None
+                pending_count = 0
+            stable.append(current)
+        else:
+            pending = k
+            pending_count = 1
+            stable.append(current)
+
+    # Log detected key changes.
+    transitions = []
+    prev = stable[0]
+    for i, k in enumerate(stable[1:], 1):
+        if k != prev:
+            transitions.append(f"m{i}: {prev} → {k}")
+            prev = k
+    if transitions:
+        logger.info("Key modulations detected (%d): %s", len(transitions), ", ".join(transitions))
+    else:
+        logger.info("No key modulation detected: %s (all %d measures)", stable[0], n)
+
+    return stable
 
 
 def _estimate_time_signature(

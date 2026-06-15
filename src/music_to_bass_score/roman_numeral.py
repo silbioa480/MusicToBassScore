@@ -112,12 +112,16 @@ def _note_to_roman_degree(note: str, key_str: str) -> str:
         return ""
 
 
-def measures_to_roman(chord_measures: list, key_str: str) -> list:
+def measures_to_roman(chord_measures: list, key: "str | list[str]") -> list:
     """Convert per-measure (offset, chord) tuples to (offset, roman) tuples.
+
+    key may be a single string (applied to all measures) or a list of strings
+    (one per measure, for songs with key modulations).
 
     Input/output shape: list[list[tuple[float, str]]].
     """
     result = []
-    for measure in chord_measures:
+    for i, measure in enumerate(chord_measures):
+        key_str = key[i] if isinstance(key, list) else key
         result.append([(off, chord_to_roman(sym, key_str)) for off, sym in measure])
     return result
