@@ -60,9 +60,7 @@ def main() -> None:
         ("soundfile", "soundfile"),
         ("numpy", "numpy"),
         ("demucs", "demucs"),
-        ("basic_pitch", "basic-pitch"),
         ("music21", "music21"),
-        ("pretty_midi", "pretty-midi"),
     ]
 
     for module_name, pkg_name in packages:

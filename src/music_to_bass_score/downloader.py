@@ -36,6 +36,12 @@ def _extract_video_id(url: str) -> str:
     return match.group(1) if match else "unknown"
 
 
+# Alternative player clients tried in order. YouTube frequently returns
+# HTTP 403 on media URLs served to the default "web" client; the mobile/tv
+# clients hand back un-throttled URLs that download reliably.
+_PLAYER_CLIENTS = ["android", "ios", "tv", "web"]
+
+
 def download_audio(
     url: str,
     output_dir: Path = AUDIO_DIR,
@@ -74,32 +80,46 @@ def download_audio(
             logger.debug("yt-dlp download finished, starting FFmpeg conversion")
             progress_cb(1.0)
 
-    ydl_opts = {
-        "format": YTDLP_FORMAT,
-        "outtmpl": str(output_path),
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "wav",
-                "preferredquality": "0",
-            }
-        ],
-        "postprocessor_args": ["-ar", str(SAMPLE_RATE)],
-        "progress_hooks": [_progress_hook],
-        "quiet": True,
-        "no_warnings": True,
-        "nocheckcertificate": True,
-    }
+    def _build_opts(player_client: str) -> dict:
+        return {
+            "format": YTDLP_FORMAT,
+            "outtmpl": str(output_path),
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "wav",
+                    "preferredquality": "0",
+                }
+            ],
+            "postprocessor_args": ["-ar", str(SAMPLE_RATE)],
+            "progress_hooks": [_progress_hook],
+            "quiet": True,
+            "no_warnings": True,
+            "nocheckcertificate": True,
+            "retries": 5,
+            "fragment_retries": 5,
+            "extractor_args": {"youtube": {"player_client": [player_client]}},
+        }
 
     logger.debug("Starting yt-dlp download: video_id=%s", video_id)
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+    info = None
+    last_exc: Optional[Exception] = None
+    for client in _PLAYER_CLIENTS:
+        try:
+            logger.debug("yt-dlp attempt with player_client=%s", client)
+            with yt_dlp.YoutubeDL(_build_opts(client)) as ydl:
+                info = ydl.extract_info(url, download=True)
             if info is None:
                 raise RuntimeError(f"Failed to extract info from: {url}")
-    except Exception as exc:
-        logger.error("yt-dlp download failed: %s", exc, exc_info=True)
-        raise
+            logger.info("Download succeeded with player_client=%s", client)
+            break
+        except Exception as exc:  # noqa: BLE001 — try the next client on any failure
+            last_exc = exc
+            logger.warning("yt-dlp failed with player_client=%s: %s", client, exc)
+            output_path.with_suffix(".part").unlink(missing_ok=True)
+    if info is None:
+        logger.error("yt-dlp download failed on all clients: %s", last_exc, exc_info=True)
+        raise last_exc if last_exc else RuntimeError(f"Download failed: {url}")
 
     duration = float(info.get("duration", 0))
     if duration > MAX_AUDIO_DURATION_SEC:
@@ -129,7 +149,12 @@ def download_audio(
 
 
 def _fetch_info(url: str) -> dict:
-    ydl_opts = {"quiet": True, "no_warnings": True, "nocheckcertificate": True}
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "nocheckcertificate": True,
+        "extractor_args": {"youtube": {"player_client": _PLAYER_CLIENTS}},
+    }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return info or {}
