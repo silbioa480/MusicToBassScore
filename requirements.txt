@@ -1,0 +1,32 @@
+# ─── Web UI ───────────────────────────────────────────────────────────────────
+streamlit>=1.35.0
+
+# ─── YouTube download ─────────────────────────────────────────────────────────
+yt-dlp>=2024.5.0
+
+# ─── Audio processing ─────────────────────────────────────────────────────────
+librosa>=0.10.2
+soundfile>=0.12.1
+numpy>=1.26.0,<2.3.0
+scipy>=1.13.0
+resampy>=0.2.2,<0.4.3
+
+# ─── Bass stem separation ─────────────────────────────────────────────────────
+demucs>=4.0.1
+torch>=2.2.0
+torchaudio>=2.2.0
+
+# ─── Note transcription ───────────────────────────────────────────────────────
+basic-pitch>=0.3.0
+pretty-midi>=0.2.9
+
+# ─── Music theory + score construction ───────────────────────────────────────
+music21>=9.1.0
+
+# ─── Chord recognition (BTC Transformer; run scripts/setup_btc.py to fetch model) ─
+mir_eval>=0.6
+pyyaml>=5.1
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+requests>=2.31.0
+matplotlib>=3.8.0
