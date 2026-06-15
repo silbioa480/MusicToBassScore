@@ -16,10 +16,6 @@ demucs>=4.0.1
 torch>=2.2.0
 torchaudio>=2.2.0
 
-# ─── Note transcription ───────────────────────────────────────────────────────
-basic-pitch>=0.3.0
-pretty-midi>=0.2.9
-
 # ─── Music theory + score construction ───────────────────────────────────────
 music21>=9.1.0
 
