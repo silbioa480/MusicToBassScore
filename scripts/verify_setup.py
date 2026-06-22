@@ -61,6 +61,8 @@ def main() -> None:
         ("numpy", "numpy"),
         ("demucs", "demucs"),
         ("music21", "music21"),
+        ("mir_eval", "mir_eval"),
+        ("yaml", "pyyaml"),
     ]
 
     for module_name, pkg_name in packages:
@@ -70,6 +72,18 @@ def main() -> None:
             results.append(check(f"  {pkg_name}", True, f"v{ver}"))
         except ImportError:
             results.append(check(f"  {pkg_name}", False, f"pip install {pkg_name}"))
+
+    print()
+    print("BTC 코드 인식 모델 검증:")
+    try:
+        from music_to_bass_score import btc_chord
+        if btc_chord.is_available():
+            results.append(check("  BTC large-voca 모델", True, str(btc_chord._CKPT)))
+        else:
+            # BTC is optional (chroma fallback exists) — warn, don't fail.
+            print(f"{WARN} BTC 모델 — 미설치 (python scripts/setup_btc.py). 크로마 폴백 사용, 정확도 저하")
+    except Exception as e:
+        print(f"{WARN} BTC 모델 — 확인 불가 ({e}). 크로마 폴백 사용됨")
 
     print()
     print("소스 패키지 검증:")
