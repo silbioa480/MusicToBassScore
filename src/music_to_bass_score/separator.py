@@ -26,15 +26,14 @@ class SeparationResult:
 def separate_bass_cached(
     audio_path: Path,
     output_dir: Path = STEMS_DIR,
-    model_name: str = "htdemucs",
+    model_name: str = DEMUCS_MODEL,
     device: str = "auto",
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> Optional[Path]:
     """Separate the bass stem, reusing a cached result if present.
 
-    Uses the lighter single-model `htdemucs` (bag of 1) by default — fast enough
-    for CPU and more than adequate for bass-note detection. Returns the bass-stem
-    path, or None if separation is unavailable/fails (caller falls back gracefully).
+    Returns the bass-stem path, or None if separation is unavailable/fails
+    (caller falls back gracefully to full-mix chroma).
     """
     stem_dir = output_dir / model_name / audio_path.stem
     bass_path = stem_dir / "bass.wav"

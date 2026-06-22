@@ -33,7 +33,10 @@ def validate_youtube_url(url: str) -> bool:
 
 def _extract_video_id(url: str) -> str:
     match = re.search(r"(?:v=|youtu\.be/|shorts/)([\w-]+)", url)
-    return match.group(1) if match else "unknown"
+    if match:
+        return match.group(1)
+    import hashlib
+    return "url_" + hashlib.sha1(url.encode()).hexdigest()[:12]
 
 
 # Alternative player clients tried in order. YouTube frequently returns
@@ -95,7 +98,6 @@ def download_audio(
             "progress_hooks": [_progress_hook],
             "quiet": True,
             "no_warnings": True,
-            "nocheckcertificate": True,
             "retries": 5,
             "fragment_retries": 5,
             "extractor_args": {"youtube": {"player_client": [player_client]}},
@@ -152,7 +154,6 @@ def _fetch_info(url: str) -> dict:
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-        "nocheckcertificate": True,
         "extractor_args": {"youtube": {"player_client": _PLAYER_CLIENTS}},
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
