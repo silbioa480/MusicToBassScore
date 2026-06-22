@@ -16,7 +16,7 @@ from .analyzer import (
     refine_key_with_chords,
 )
 from .chord_detector import detect_chords_per_measure
-from .config import AUDIO_DIR, MIDI_DIR, SAMPLE_RATE, SCORES_DIR, STEMS_DIR
+from .config import AUDIO_DIR, SAMPLE_RATE, SCORES_DIR
 from .downloader import SongMetadata, download_audio
 from .logger import get_logger
 from .pdf_exporter import ExportResult, export_to_pdf
