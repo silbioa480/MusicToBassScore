@@ -8,7 +8,9 @@ from music_to_bass_score.analyzer import (
     _estimate_bpm_and_beats,
     _estimate_key,
     _estimate_time_signature,
+    _is_relative_key,
     _score_key,
+    _tonic_root_count,
     build_measure_grid,
     refine_key_with_chords,
 )
@@ -99,6 +101,39 @@ class TestDiatonicCount:
         assert _diatonic_count(measures, "C major") == 2
 
 
+class TestIsRelativeKey:
+    def test_g_major_e_minor(self):
+        assert _is_relative_key("G major", "E minor")
+        assert _is_relative_key("E minor", "G major")
+
+    def test_c_major_a_minor(self):
+        assert _is_relative_key("C major", "A minor")
+        assert _is_relative_key("A minor", "C major")
+
+    def test_parallel_keys_not_relative(self):
+        assert not _is_relative_key("A major", "A minor")
+
+    def test_same_mode_not_relative(self):
+        assert not _is_relative_key("G major", "D major")
+
+    def test_unrelated_keys(self):
+        assert not _is_relative_key("C major", "D minor")
+
+
+class TestTonicRootCount:
+    def test_counts_matching_roots(self):
+        measures = [[(0.0, "G")], [(0.0, "Em")], [(0.0, "G/B")], [(0.0, "C")]]
+        assert _tonic_root_count(measures, "G") == 2  # G and G/B both have root G
+
+    def test_strips_question_mark(self):
+        measures = [[(0.0, "G?")], [(0.0, "Am?")]]
+        assert _tonic_root_count(measures, "G") == 1
+
+    def test_skips_nc(self):
+        measures = [[(0.0, "N.C.")], [(0.0, "G")]]
+        assert _tonic_root_count(measures, "G") == 1
+
+
 class TestRefineKeyWithChords:
     def test_keeps_consistent_major_key(self):
         key_labels = ["C major"] * 8
@@ -113,6 +148,20 @@ class TestRefineKeyWithChords:
         chords = [[(0.0, "Cm")], [(0.0, "Fm")], [(0.0, "Gm")], [(0.0, "Eb")]] * 2
         refined = refine_key_with_chords(key_labels, chords, window=8)
         assert all(k == "C minor" for k in refined)
+
+    def test_keeps_key_when_relative_tonic_not_dominant(self):
+        # G major key with G chord prominent — should NOT flip to E minor
+        key_labels = ["G major"] * 8
+        chords = [[(0.0, "G")], [(0.0, "Em")], [(0.0, "C")], [(0.0, "D")]] * 2
+        refined = refine_key_with_chords(key_labels, chords, window=8)
+        assert all(k == "G major" for k in refined)
+
+    def test_flips_to_relative_minor_when_e_dominates(self):
+        # Chroma detected G major, but E chord appears 3× more than G → flip to E minor
+        key_labels = ["G major"] * 8
+        chords = [[(0.0, "E")], [(0.0, "E")], [(0.0, "E")], [(0.0, "G")]] * 2
+        refined = refine_key_with_chords(key_labels, chords, window=8)
+        assert all(k == "E minor" for k in refined)
 
     def test_length_preserved(self):
         key_labels = ["A minor"] * 5
