@@ -13,7 +13,7 @@ SCORES_DIR = TMP_DIR / "scores"
 for _d in (AUDIO_DIR, STEMS_DIR, MIDI_DIR, SCORES_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
-DEMUCS_MODEL: str = "htdemucs_ft"
+DEMUCS_MODEL: str = "htdemucs"  # bag-of-1 model: lighter and fast enough on CPU
 
 SAMPLE_RATE: int = 44100
 HOP_LENGTH: int = 512

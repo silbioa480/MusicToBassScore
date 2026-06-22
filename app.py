@@ -146,8 +146,13 @@ if youtube_btn and url_input.strip():
 if file_btn and uploaded_file is not None:
     from music_to_bass_score.config import AUDIO_DIR
 
-    suffix = Path(uploaded_file.name).suffix.lower()
-    save_path = AUDIO_DIR / uploaded_file.name
+    # Strip directory components from the browser-supplied filename to prevent
+    # path traversal (e.g. "../../../etc/passwd" → "passwd").
+    safe_name = Path(uploaded_file.name).name
+    save_path = (AUDIO_DIR / safe_name).resolve()
+    if not save_path.is_relative_to(AUDIO_DIR.resolve()):
+        st.error("❌ 유효하지 않은 파일명입니다.")
+        st.stop()
     save_path.write_bytes(uploaded_file.read())
 
     cb, progress_bar, status_text = _make_progress_cb()

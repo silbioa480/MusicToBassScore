@@ -6,7 +6,7 @@ a real YouTube URL + network access. Unit tests mock the individual steps.
 
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from music_to_bass_score.pipeline import PipelineResult, _safe_filename
 
@@ -41,7 +41,6 @@ class TestPipelineMocked:
         from music_to_bass_score.downloader import SongMetadata
         from music_to_bass_score.analyzer import AudioAnalysis
         from music_to_bass_score.separator import SeparationResult
-        from music_to_bass_score.transcriber import TranscriptionResult, NoteEvent
         from music_to_bass_score.pdf_exporter import ExportResult
         from music21 import stream
 
@@ -49,8 +48,6 @@ class TestPipelineMocked:
         wav.write_bytes(b"RIFF")
         bass = tmp_path / "bass.wav"
         bass.write_bytes(b"RIFF")
-        midi = tmp_path / "test.mid"
-        midi.write_bytes(b"MThd")
         pdf = tmp_path / "score.pdf"
         pdf.write_bytes(b"%PDF")
 
@@ -64,27 +61,44 @@ class TestPipelineMocked:
             time_signature_num=4, time_signature_den=4,
             duration_sec=60.0, sample_rate=44100,
         )
+        # vocals/other left None → harmonic-mix step is skipped (BTC uses full mix)
         sep = SeparationResult(bass_path=bass, stems_dir=tmp_path)
-        transcription = TranscriptionResult(
-            midi_path=midi,
-            note_events=[NoteEvent(pitch=45, start_sec=0.0, end_sec=0.5, velocity=80)],
-        )
         export = ExportResult(pdf_path=pdf, lily_path=None)
         score = stream.Score()
 
-        return meta, analysis, sep, transcription, export, score
+        # Current pipeline shapes: per-measure list of (offset, label) tuples
+        chord_labels = [[(0.0, "Am")], [(0.0, "F")]]
+        key_labels = ["A minor", "A minor"]
+        measure_grid = [0.0, 2.0]
+
+        return meta, analysis, sep, export, score, chord_labels, key_labels, measure_grid
+
+    def _patches(self, meta, analysis, sep, export, score,
+                 chord_labels, key_labels, measure_grid):
+        """Patch every orchestrated sub-step of the current chord-chart pipeline."""
+        return [
+            patch("music_to_bass_score.pipeline.download_audio", return_value=meta),
+            patch("music_to_bass_score.pipeline.analyze_audio", return_value=analysis),
+            patch("music_to_bass_score.pipeline.detect_first_onset", return_value=0.0),
+            patch("music_to_bass_score.pipeline.build_measure_grid", return_value=measure_grid),
+            patch("music_to_bass_score.pipeline.detect_key_per_section", return_value=key_labels),
+            patch("music_to_bass_score.pipeline.separate_bass_cached", return_value=sep),
+            patch("music_to_bass_score.pipeline.detect_chords_per_measure", return_value=chord_labels),
+            patch("music_to_bass_score.pipeline.refine_key_with_chords", return_value=key_labels),
+            patch("music_to_bass_score.pipeline.measures_to_roman",
+                  return_value=[[(0.0, "i")], [(0.0, "VI")]]),
+            patch("music_to_bass_score.pipeline.build_chord_chart", return_value=score),
+            patch("music_to_bass_score.pipeline.export_to_pdf", return_value=export),
+        ]
 
     def test_pipeline_returns_result(self, tmp_path):
-        meta, analysis, sep, transcription, export, score = self._make_mocks(tmp_path)
+        mocks = self._make_mocks(tmp_path)
+        chord_labels = mocks[5]
 
-        with patch("music_to_bass_score.pipeline.download_audio", return_value=meta), \
-             patch("music_to_bass_score.pipeline.analyze_audio", return_value=analysis), \
-             patch("music_to_bass_score.pipeline.separate_bass", return_value=sep), \
-             patch("music_to_bass_score.pipeline.transcribe_bass", return_value=transcription), \
-             patch("music_to_bass_score.pipeline.detect_chords_per_measure", return_value=["Am", "F"]), \
-             patch("music_to_bass_score.pipeline.build_score", return_value=score), \
-             patch("music_to_bass_score.pipeline.export_to_pdf", return_value=export):
-
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in self._patches(*mocks):
+                stack.enter_context(p)
             from music_to_bass_score.pipeline import run_pipeline
             result = run_pipeline(
                 youtube_url="https://youtu.be/test",
@@ -94,21 +108,17 @@ class TestPipelineMocked:
         assert isinstance(result, PipelineResult)
         assert result.metadata.title == "Mock Song"
         assert result.analysis.bpm_rounded == 120
-        assert result.chord_labels == ["Am", "F"]
+        assert result.chord_labels == chord_labels
         assert result.export.pdf_path.exists()
 
     def test_progress_callback_receives_messages(self, tmp_path):
-        meta, analysis, sep, transcription, export, score = self._make_mocks(tmp_path)
+        mocks = self._make_mocks(tmp_path)
         messages = []
 
-        with patch("music_to_bass_score.pipeline.download_audio", return_value=meta), \
-             patch("music_to_bass_score.pipeline.analyze_audio", return_value=analysis), \
-             patch("music_to_bass_score.pipeline.separate_bass", return_value=sep), \
-             patch("music_to_bass_score.pipeline.transcribe_bass", return_value=transcription), \
-             patch("music_to_bass_score.pipeline.detect_chords_per_measure", return_value=["Am"]), \
-             patch("music_to_bass_score.pipeline.build_score", return_value=score), \
-             patch("music_to_bass_score.pipeline.export_to_pdf", return_value=export):
-
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in self._patches(*mocks):
+                stack.enter_context(p)
             from music_to_bass_score.pipeline import run_pipeline
             run_pipeline(
                 youtube_url="https://youtu.be/test",
@@ -157,7 +167,6 @@ class TestRunPipelineFromFile:
         assert result.export.pdf_path.stat().st_size > 0
 
     def test_nonexistent_file_raises(self, tmp_path):
-        from pathlib import Path
         from music_to_bass_score.pipeline import run_pipeline_from_file
         with pytest.raises(FileNotFoundError):
             run_pipeline_from_file(

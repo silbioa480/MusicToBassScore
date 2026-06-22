@@ -81,8 +81,12 @@ def _load_model():
     return _CACHE["model"]
 
 
-def recognize_chords(audio_path: Path) -> list[tuple[float, float, str]]:
-    """Run BTC inference; return [(start_sec, end_sec, symbol)] over the whole track."""
+def recognize_chords(audio_path: Path) -> list[tuple[float, float, str, float]]:
+    """Run BTC inference; return [(start_sec, end_sec, symbol, confidence)] over the whole track.
+
+    `confidence` is the mean max-softmax probability across all timesteps within the segment.
+    Higher values (0–1) indicate stronger model certainty about the chord label.
+    """
     model, mean, std, idx_to_chord, config, torch = _load_model()
     from utils.mir_eval_modules import audio_file_to_features
 
@@ -95,43 +99,91 @@ def recognize_chords(audio_path: Path) -> list[tuple[float, float, str]]:
     feature = np.pad(feature, ((0, num_pad), (0, 0)), mode="constant", constant_values=0)
     num_instance = feature.shape[0] // n
 
-    segments: list[tuple[float, float, str]] = []
+    segments: list[tuple[float, float, str, float]] = []
     start_time = 0.0
+    prev_idx: int | None = None
+    conf_sum = 0.0
+    conf_count = 0
+
     with torch.no_grad():
         ft = torch.tensor(feature, dtype=torch.float32).unsqueeze(0)
-        prev = None
         for t in range(num_instance):
             attn, _ = model.self_attn_layers(ft[:, n * t:n * (t + 1), :])
-            pred, _ = model.output_layer(attn)
-            pred = pred.squeeze()
+            # Extract logits directly from the projection layer to get softmax probabilities.
+            # model.output_layer returns argmax indices; we need probabilities for confidence.
+            logits = model.output_layer.output_projection(attn)  # (1, n, num_chords)
+            probs = torch.softmax(logits, dim=-1)                # (1, n, num_chords)
+            pred_idx = probs.argmax(dim=-1).squeeze(0)           # (n,) — argmax per frame
+            pred_conf = probs.max(dim=-1).values.squeeze(0)      # (n,) — max prob per frame
+
             for i in range(n):
                 gidx = n * t + i
+                idx = int(pred_idx[i].item())
+                conf = float(pred_conf[i].item())
+
                 if t == 0 and i == 0:
-                    prev = pred[i].item()
+                    prev_idx = idx
+                    conf_sum = conf
+                    conf_count = 1
                     continue
-                if pred[i].item() != prev:
-                    segments.append((start_time, feature_per_second * gidx, idx_to_chord[prev]))
+
+                if idx != prev_idx:
+                    mean_conf = conf_sum / max(1, conf_count)
+                    segments.append((
+                        start_time,
+                        feature_per_second * gidx,
+                        idx_to_chord[prev_idx],
+                        mean_conf,
+                    ))
                     start_time = feature_per_second * gidx
-                    prev = pred[i].item()
+                    prev_idx = idx
+                    conf_sum = conf
+                    conf_count = 1
+                else:
+                    conf_sum += conf
+                    conf_count += 1
+
                 if t == num_instance - 1 and i + num_pad == n:
                     if start_time != feature_per_second * gidx:
-                        segments.append((start_time, feature_per_second * gidx, idx_to_chord[prev]))
+                        mean_conf = conf_sum / max(1, conf_count)
+                        segments.append((
+                            start_time,
+                            feature_per_second * gidx,
+                            idx_to_chord[prev_idx],
+                            mean_conf,
+                        ))
                     break
 
-    timeline = [(s, e, _harte_to_symbol(c)) for s, e, c in segments]
+    timeline = [(s, e, _harte_to_symbol(c), conf) for s, e, c, conf in segments]
     logger.info(
         "BTC recognised %d chord segments over %.1fs (first: %s)",
         len(timeline), song_length,
-        [c for *_, c in timeline[:6]],
+        [c for _, _, c, *_ in timeline[:6]],
     )
     return timeline
 
 
-def chord_at_window(timeline: list[tuple[float, float, str]], start: float, end: float) -> str:
-    """Return the chord symbol covering the most time within [start, end)."""
-    best_sym, best_overlap = "N.C.", 0.0
-    for s, e, sym in timeline:
+def chord_at_window(
+    timeline: list[tuple],
+    start: float,
+    end: float,
+) -> tuple[str, float]:
+    """Return (symbol, confidence) for the chord with highest confidence-weighted coverage.
+
+    Weights each chord by overlap_seconds × mean_segment_confidence, so a chord that
+    fills most of the window with high certainty beats a chord that fills slightly more
+    time but with low certainty.
+    """
+    scores: dict[str, float] = {}
+    conf_acc: dict[str, float] = {}
+    for seg in timeline:
+        s, e, sym = seg[0], seg[1], seg[2]
+        conf = seg[3] if len(seg) > 3 else 1.0
         overlap = min(end, e) - max(start, s)
-        if overlap > best_overlap:
-            best_overlap, best_sym = overlap, sym
-    return best_sym
+        if overlap > 0.0:
+            scores[sym] = scores.get(sym, 0.0) + overlap * conf
+            conf_acc[sym] = max(conf_acc.get(sym, 0.0), conf)
+    if not scores:
+        return "N.C.", 0.0
+    best_sym = max(scores, key=scores.__getitem__)
+    return best_sym, conf_acc[best_sym]

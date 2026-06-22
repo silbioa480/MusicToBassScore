@@ -21,34 +21,44 @@ logger = get_logger(__name__)
 class SeparationResult:
     bass_path: Path
     stems_dir: Path
+    vocals_path: Optional[Path] = None
+    other_path: Optional[Path] = None
+    drums_path: Optional[Path] = None
 
 
 def separate_bass_cached(
     audio_path: Path,
     output_dir: Path = STEMS_DIR,
-    model_name: str = "htdemucs",
+    model_name: str = DEMUCS_MODEL,
     device: str = "auto",
     progress_cb: Optional[Callable[[float], None]] = None,
-) -> Optional[Path]:
-    """Separate the bass stem, reusing a cached result if present.
+) -> Optional[SeparationResult]:
+    """Separate all stems, reusing a cached result if present.
 
-    Uses the lighter single-model `htdemucs` (bag of 1) by default — fast enough
-    for CPU and more than adequate for bass-note detection. Returns the bass-stem
-    path, or None if separation is unavailable/fails (caller falls back gracefully).
+    Returns a SeparationResult with all available stem paths, or None on failure.
+    Callers fall back gracefully when vocals_path / other_path are None.
     """
     stem_dir = output_dir / model_name / audio_path.stem
     bass_path = stem_dir / "bass.wav"
     if bass_path.is_file() and bass_path.stat().st_size > 0:
-        logger.info("Reusing cached bass stem: %s", bass_path)
+        logger.info("Reusing cached stems: %s", stem_dir)
         if progress_cb:
             progress_cb(1.0)
-        return bass_path
+        vocals_p = stem_dir / "vocals.wav"
+        other_p = stem_dir / "other.wav"
+        drums_p = stem_dir / "drums.wav"
+        return SeparationResult(
+            bass_path=bass_path,
+            stems_dir=output_dir,
+            vocals_path=vocals_p if vocals_p.is_file() else None,
+            other_path=other_p if other_p.is_file() else None,
+            drums_path=drums_p if drums_p.is_file() else None,
+        )
     try:
-        result = separate_bass(
+        return separate_bass(
             audio_path, output_dir=output_dir, model_name=model_name,
             device=device, progress_cb=progress_cb,
         )
-        return result.bass_path
     except Exception as exc:  # noqa: BLE001 — separation is optional, never fatal
         logger.warning("Bass separation failed (%s); chord detection will use full mix", exc)
         return None
@@ -119,22 +129,35 @@ def separate_bass(
 
     sources = sources * std + ref
 
-    bass_idx = model.sources.index("bass")
-    bass_wav = sources[0, bass_idx].cpu().numpy()  # (channels, samples)
-
     stem_dir = output_dir / model_name / audio_path.stem
     stem_dir.mkdir(parents=True, exist_ok=True)
-    bass_path = stem_dir / "bass.wav"
 
-    bass_wav_T = bass_wav.T  # (samples, channels)
-    sf.write(str(bass_path), bass_wav_T, model.samplerate)
+    # Save all stems (Demucs computed them all anyway — only disk I/O added)
+    stem_paths: dict[str, Path] = {}
+    for stem_name in model.sources:
+        stem_idx = model.sources.index(stem_name)
+        stem_wav = sources[0, stem_idx].cpu().numpy().T  # (samples, channels)
+        stem_path = stem_dir / f"{stem_name}.wav"
+        sf.write(str(stem_path), stem_wav, model.samplerate)
+        stem_paths[stem_name] = stem_path
+
+    bass_path = stem_paths["bass"]
 
     if progress_cb:
         progress_cb(1.0)
 
     size_kb = bass_path.stat().st_size // 1024
-    logger.info("Bass separation complete: %s (%dKB)", bass_path, size_kb)
-    return SeparationResult(bass_path=bass_path, stems_dir=output_dir)
+    logger.info(
+        "Stem separation complete: %s (%dKB bass, stems=%s)",
+        stem_dir, size_kb, list(stem_paths.keys()),
+    )
+    return SeparationResult(
+        bass_path=bass_path,
+        stems_dir=output_dir,
+        vocals_path=stem_paths.get("vocals"),
+        other_path=stem_paths.get("other"),
+        drums_path=stem_paths.get("drums"),
+    )
 
 
 def _resolve_device(device: str) -> str:

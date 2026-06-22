@@ -31,6 +31,7 @@ def build_chord_chart(
     analysis: AudioAnalysis,
     chord_labels: list,
     roman_labels: list,
+    key_labels: list[str] | None = None,
     include_tab: bool = False,  # accepted for API symmetry; ignored (chart has no TAB)
 ) -> stream.Score:
     """Build a chord chart carrier score: chord symbols + roman degrees per measure.
@@ -67,6 +68,14 @@ def build_chord_chart(
     n_measures = max(len(chord_labels), len(roman_labels), 1)
     for m_idx in range(n_measures):
         measure = stream.Measure(number=m_idx + 1)
+
+        # Key-change marker: inserted when key transitions between consecutive measures.
+        if key_labels and m_idx > 0 and m_idx < len(key_labels):
+            if key_labels[m_idx] != key_labels[m_idx - 1]:
+                new_root = key_labels[m_idx].split()[0]
+                km = expressions.TextExpression(f"[Key: {new_root}]")
+                km.placement = 'above'
+                measure.insert(0.0, km)
 
         chords = chord_labels[m_idx] if m_idx < len(chord_labels) else []
         romans = roman_labels[m_idx] if m_idx < len(roman_labels) else []
