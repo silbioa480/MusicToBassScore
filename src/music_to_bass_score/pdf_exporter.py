@@ -416,15 +416,15 @@ def _measure_cell_parts(measure, beats: int) -> tuple[str, str]:
         return f'"{_esc(sym)}"'
 
     if key_marker and above:
-        # Prepend key-change marker as smaller bold text before the first chord symbol.
+        # Prepend key-change marker as smaller bold red text before the first chord symbol.
         first_off, first_sym = above[0]
-        km_mu = f'\\fontsize #-3 \\bold "{_esc(key_marker)}"'
+        km_mu = f"\\fontsize #-3 \\bold \\with-color #(x11-color 'red) \"{_esc(key_marker)}\""
         first_mu = f'\\line {{ {km_mu} \\hspace #0.4 {_chord_mu(first_sym)} }}'
         chord_items = [(first_off, first_mu)] + [
             (off, _chord_mu(sym)) for off, sym in above[1:]
         ]
     elif key_marker:
-        chord_items = [(0.0, f'\\fontsize #-3 \\bold "{_esc(key_marker)}"')]
+        chord_items = [(0.0, f"\\fontsize #-3 \\bold \\with-color #(x11-color 'red) \"{_esc(key_marker)}\"")]
     else:
         chord_items = [(off, _chord_mu(sym)) for off, sym in above]
 

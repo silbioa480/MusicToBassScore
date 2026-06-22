@@ -246,14 +246,15 @@ def detect_key_per_section(
     pending: Optional[str] = None
     pending_count = 0
     for k in raw_keys[1:]:
-        if k == current:
+        # Relative keys (G major ↔ E minor) share a key signature and cannot be told
+        # apart reliably from chroma alone — treat them as the current key, never a modulation.
+        if k == current or _is_relative_key(current, k):
             pending = None
             pending_count = 0
             stable.append(current)
         elif k == pending:
             pending_count += 1
-            needed = min_stable * _REL_KEY_MIN_STABLE_MULT if _is_relative_key(current, k) else min_stable
-            if pending_count >= needed:
+            if pending_count >= min_stable:
                 current = k
                 pending = None
                 pending_count = 0
@@ -280,7 +281,6 @@ def detect_key_per_section(
 
 _MAJOR_INTERVALS = frozenset([0, 2, 4, 5, 7, 9, 11])
 _MINOR_INTERVALS = frozenset([0, 2, 3, 5, 7, 8, 10])
-_REL_KEY_MIN_STABLE_MULT = 3  # relative-key transitions need 3× more stability evidence
 
 _NOTE_SEMITONES_A: dict[str, int] = {
     "C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
@@ -338,34 +338,20 @@ def _diatonic_count(chord_labels_window: list, key_str: str) -> int:
     return count
 
 
-def _tonic_root_count(chord_labels_window: list, tonic: str) -> int:
-    """Count chords whose root matches tonic exactly."""
-    tonic_semi = _NOTE_SEMITONES_A.get(tonic, -1)
-    count = 0
-    for measure in chord_labels_window:
-        for _, sym in measure:
-            if sym in ("N.C.", "NC", ""):
-                continue
-            sym_clean = sym.split("/")[0].rstrip("?")
-            root = sym_clean[:2] if len(sym_clean) > 1 and sym_clean[1] in ("#", "b") else sym_clean[:1]
-            if _NOTE_SEMITONES_A.get(root, -2) == tonic_semi:
-                count += 1
-    return count
-
-
 def refine_key_with_chords(
     key_labels: list[str],
     chord_labels: list,
     window: int = 8,
 ) -> list[str]:
-    """Re-score key labels using chord evidence to resolve parallel- and relative-key ambiguity.
+    """Re-score key labels using diatonic chord membership to resolve parallel-key ambiguity.
 
-    For each sliding window, checks two alternatives:
-    1. Parallel key (same tonic, opposite mode — A major vs A minor): uses diatonic chord count.
-       Switches if parallel score > 1.3× current score.
-    2. Relative key (same key signature, different tonic — G major vs E minor): uses tonic root
-       frequency (diatonic counts are equal for relative pairs). Switches only if the relative
-       tonic chord appears > 2× more often than the current tonic chord.
+    For each sliding window of `window` measures, counts how many chord roots are diatonic
+    to the current key vs the parallel key (same tonic, opposite mode). If the parallel key
+    achieves a significantly higher diatonic count (> 1.3×), the window is re-assigned.
+
+    This resolves A major vs A minor confusion that pure chroma matching cannot distinguish.
+    Relative-key pairs (G major ↔ E minor) are NOT switched here — they share a key signature
+    and are suppressed upstream in detect_key_per_section().
     """
     n = len(key_labels)
     refined = list(key_labels)
@@ -387,19 +373,6 @@ def refine_key_with_chords(
         if parallel_score > current_score * 1.3:
             for j in range(i, w_end):
                 refined[j] = parallel_key
-            continue
-
-        # Relative key check (same diatonic set → use tonic root frequency instead)
-        rel_mode = "minor" if mode == "major" else "major"
-        rel_tonic_semi = (_NOTE_SEMITONES_A.get(tonic, 0) + (9 if mode == "major" else 3)) % 12
-        rel_tonic = KEY_NAMES[rel_tonic_semi]
-        rel_key = f"{rel_tonic} {rel_mode}"
-
-        cur_tonic_count = _tonic_root_count(window_chords, tonic)
-        rel_tonic_count = _tonic_root_count(window_chords, rel_tonic)
-        if rel_tonic_count > cur_tonic_count * 2.0:
-            for j in range(i, w_end):
-                refined[j] = rel_key
 
     changes = [i for i in range(n) if key_labels[i] != refined[i]]
     if changes:
