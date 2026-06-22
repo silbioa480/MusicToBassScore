@@ -37,10 +37,16 @@ def chord_to_roman(symbol: str, key_str: str) -> str:
 
     Handles slash chords (e.g. 'G/B'): converts the upper chord part to a roman
     numeral and appends the bass degree as a slash (e.g. 'I/III').
+    A trailing "?" confidence marker is stripped before analysis and not propagated
+    to the roman numeral (the chord label already carries the uncertainty signal).
     Falls back to the raw chord symbol if analysis fails.
     """
     if not symbol or symbol in ("N.C.", "NC"):
         return symbol or ""
+
+    # Strip low-confidence marker before music21 analysis
+    if symbol.endswith("?"):
+        symbol = symbol[:-1]
 
     # Split slash chord: upper chord + optional bass note
     if "/" in symbol:

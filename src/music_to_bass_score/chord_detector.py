@@ -70,15 +70,19 @@ def detect_chords_per_measure(
     measure_grid: Optional[list[float]] = None,
     sample_rate: int = SAMPLE_RATE,
     bass_stem_path: Optional[Path] = None,
+    btc_input_path: Optional[Path] = None,
 ) -> list[list[tuple[float, str]]]:
     """Detect chord changes per measure.
 
     Returns a list (one entry per measure) of (beat_offset, chord_symbol) tuples,
     with consecutive identical chords collapsed to change points.
 
-    Primary engine: the pretrained BTC Transformer (large vocabulary) on the FULL
-    mix (harmony needed for chord quality). Falls back to the librosa chroma matcher
-    if BTC is unavailable or errors.
+    Primary engine: the pretrained BTC Transformer (large vocabulary). By default
+    runs on the FULL mix (harmony needed for chord quality). When `btc_input_path`
+    is provided (e.g. a harmonic submix without drums), BTC runs on that file instead
+    — this reduces bass-fundamental contamination that causes D/Dm mis-labels.
+
+    Falls back to the librosa chroma matcher if BTC is unavailable or errors.
 
     `bass_stem_path`, when provided (a Demucs-separated bass stem), supplies a clean
     bass line for accurate inversion-slash notation. Without it, a (noisier) full-mix
@@ -89,7 +93,8 @@ def detect_chords_per_measure(
             from . import btc_chord
             if btc_chord.is_available():
                 return _chords_from_btc(
-                    audio_path, measure_grid, time_sig_num, bpm, bass_stem_path
+                    audio_path, measure_grid, time_sig_num, bpm, bass_stem_path,
+                    btc_input_path=btc_input_path,
                 )
             logger.warning("BTC model not found; using chroma fallback")
         except Exception as exc:
@@ -102,12 +107,28 @@ def detect_chords_per_measure(
 # BTC path
 # ---------------------------------------------------------------------------
 
-# Fraction of a measure the second chord must cover to be treated as a genuine
-# mid-measure change (vs. a blip at the measure boundary).
-_MIN_SECOND_CHORD_MEASURE_FRAC = 0.40
-# The second chord's overlap with [half-measure, end) must exceed this fraction
-# of the underlying BTC segment's total duration (filters bleed-in from next measure).
-_MIN_SECOND_CHORD_SEG_FRAC = 0.50
+# BTC boundary must land in the inner 50% of the measure (25%–75%) to be
+# treated as a genuine mid-measure chord change. Replaces the old magic fractions.
+_MID_MEASURE_BAND = 0.25
+
+# Softmax confidence below this threshold → append "?" to the chord symbol so
+# users know to verify by ear. 170-class softmax: uniform ≈ 0.006; confident ≥ 0.35.
+_LOW_CONF_THRESHOLD = 0.35
+
+# Snap measure boundaries to the nearest BTC segment boundary within ±N beats.
+_BOUNDARY_SNAP_BEATS = 0.5
+
+
+def _snap_to_btc_boundary(timeline: list, t: float, beat_dur: float) -> float:
+    """Return `t` snapped to the nearest BTC segment-start within ±_BOUNDARY_SNAP_BEATS beats."""
+    tol = beat_dur * _BOUNDARY_SNAP_BEATS
+    best_t, best_dist = t, float("inf")
+    for seg in timeline:
+        boundary = seg[0]
+        dist = abs(boundary - t)
+        if dist < tol and dist < best_dist:
+            best_dist, best_t = dist, boundary
+    return best_t
 
 
 def _chords_from_btc(
@@ -116,24 +137,35 @@ def _chords_from_btc(
     time_sig_num: int,
     bpm: float,
     bass_stem_path: Optional[Path] = None,
+    btc_input_path: Optional[Path] = None,
 ) -> list[list[tuple[float, str]]]:
     """Map the BTC chord timeline adaptively, then add inversion-slash notation.
 
-    Chords come from BTC on the FULL mix. The bass note for inversion-slash comes
-    from a clean Demucs bass stem when `bass_stem_path` is given (far more reliable),
-    otherwise from a full-mix low-register chroma.
+    BTC runs on `btc_input_path` when provided (harmonic submix without drums reduces
+    bass-fundamental contamination), otherwise on the full mix `audio_path`.
+
+    Beat-snap: each measure boundary is snapped to the nearest BTC segment boundary
+    within ±0.5 beats — this compensates for constant-tempo grid drift.
+
+    Mid-measure detection: 2 chords per measure only when a BTC boundary falls in the
+    inner 50% of the measure (replacing fragile overlap-fraction heuristics).
+
+    Confidence: chord symbols get a "?" suffix when the model's max softmax probability
+    is below _LOW_CONF_THRESHOLD — signals uncertain regions for human review.
     """
     from . import btc_chord
 
+    run_path = btc_input_path if (btc_input_path and Path(btc_input_path).is_file()) else audio_path
     logger.info(
-        "Detecting chords (BTC large-voca): %s (bpm=%.1f time_sig=%d/4 grid=%d measures, bass_stem=%s)",
-        audio_path, bpm, time_sig_num, len(measure_grid),
+        "Detecting chords (BTC large-voca): input=%s bpm=%.1f time_sig=%d/4 grid=%d measures bass=%s",
+        run_path.name, bpm, time_sig_num, len(measure_grid),
         "clean" if bass_stem_path else "full-mix",
     )
-    timeline = btc_chord.recognize_chords(audio_path)
-    spm = (60.0 / bpm) * time_sig_num  # seconds per measure
+    timeline = btc_chord.recognize_chords(run_path)
+    beat_dur = 60.0 / bpm
+    spm = beat_dur * time_sig_num  # seconds per measure
 
-    # Bass chroma source: prefer a clean separated bass stem; else full-mix low band.
+    # Bass chroma source: prefer clean bass stem; else full-mix low-register band.
     if bass_stem_path is not None and Path(bass_stem_path).is_file():
         y, sr = librosa.load(str(bass_stem_path), sr=SAMPLE_RATE, mono=True)
         bass_ch = librosa.feature.chroma_cqt(
@@ -152,39 +184,43 @@ def _chords_from_btc(
     )
 
     measures: list[list[tuple[float, str]]] = []
-    for m_start in measure_grid:
+    for m_start_grid in measure_grid:
+        # Snap measure start to nearest BTC boundary to correct for tempo-grid drift.
+        m_start = _snap_to_btc_boundary(timeline, m_start_grid, beat_dur)
         m_end = m_start + spm
         mid = m_start + spm / 2.0
 
-        dom = btc_chord.chord_at_window(timeline, m_start, m_end)
-        c1 = btc_chord.chord_at_window(timeline, m_start, mid)
-        c2 = btc_chord.chord_at_window(timeline, mid, m_end)
+        dom, dom_conf = btc_chord.chord_at_window(timeline, m_start, m_end)
+        c1, c1_conf = btc_chord.chord_at_window(timeline, m_start, mid)
+        c2, c2_conf = btc_chord.chord_at_window(timeline, mid, m_end)
 
         if c1 != c2:
-            # Check if the second chord is a genuine mid-measure change:
-            # its overlap with [mid, m_end) must be >= _MIN_SECOND_CHORD_MEASURE_FRAC × spm
-            # AND represent >= _MIN_SECOND_CHORD_SEG_FRAC of its full BTC-segment duration.
-            seg_overlap = _segment_coverage_in_window(timeline, c2, mid, m_end)
-            c2_seg_dur = _segment_total_duration(timeline, c2, mid, m_end)
-            genuine = (
-                seg_overlap >= _MIN_SECOND_CHORD_MEASURE_FRAC * spm
-                and (c2_seg_dur <= 0 or seg_overlap / c2_seg_dur >= _MIN_SECOND_CHORD_SEG_FRAC)
+            # Genuine mid-measure change: a BTC segment boundary must fall in the
+            # inner [25%, 75%] of the measure — replaces fragile overlap fractions.
+            inner_lo = m_start + _MID_MEASURE_BAND * spm
+            inner_hi = m_end - _MID_MEASURE_BAND * spm
+            genuine = any(
+                inner_lo <= seg[0] <= inner_hi or inner_lo <= seg[1] <= inner_hi
+                for seg in timeline
+                if max(m_start, seg[0]) < min(m_end, seg[1])
             )
         else:
             genuine = False
 
         if genuine:
             beat_half = float(time_sig_num) / 2.0
-            raw = [(0.0, c1), (beat_half, c2)]
+            raw: list[tuple[float, str, float]] = [(0.0, c1, c1_conf), (beat_half, c2, c2_conf)]
         else:
-            raw = [(0.0, dom)]
+            raw = [(0.0, dom, dom_conf)]
 
-        # Apply inversion-slash annotation to each chord in this measure
+        # Apply inversion-slash annotation + low-confidence "?" marker
         seg_list = []
-        for beat_off, chord in raw:
+        for beat_off, chord, conf in raw:
             t0 = m_start + (beat_off / time_sig_num) * spm
             t1 = m_start + ((beat_off / time_sig_num) + 0.5) * spm
             chord = _apply_slash_bass(chord, bass_ch, times, t0, t1)
+            if conf < _LOW_CONF_THRESHOLD and chord not in ("N.C.", "NC"):
+                chord = chord + "?"
             seg_list.append((beat_off, chord))
         measures.append(seg_list)
 
@@ -195,22 +231,24 @@ def _chords_from_btc(
 
 
 def _segment_coverage_in_window(
-    timeline: list[tuple[float, float, str]], sym: str, t0: float, t1: float
+    timeline: list, sym: str, t0: float, t1: float
 ) -> float:
     """Total seconds that BTC segments with label `sym` overlap [t0, t1)."""
     total = 0.0
-    for s, e, c in timeline:
+    for seg in timeline:
+        s, e, c = seg[0], seg[1], seg[2]
         if c == sym:
             total += max(0.0, min(t1, e) - max(t0, s))
     return total
 
 
 def _segment_total_duration(
-    timeline: list[tuple[float, float, str]], sym: str, t0: float, t1: float
+    timeline: list, sym: str, t0: float, t1: float
 ) -> float:
     """Duration of the BTC segment for `sym` that overlaps [t0, t1) the most."""
     best_overlap, best_dur = 0.0, 0.0
-    for s, e, c in timeline:
+    for seg in timeline:
+        s, e, c = seg[0], seg[1], seg[2]
         if c == sym:
             overlap = max(0.0, min(t1, e) - max(t0, s))
             if overlap > best_overlap:

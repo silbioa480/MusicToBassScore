@@ -277,6 +277,83 @@ def detect_key_per_section(
     return stable
 
 
+_MAJOR_INTERVALS = frozenset([0, 2, 4, 5, 7, 9, 11])
+_MINOR_INTERVALS = frozenset([0, 2, 3, 5, 7, 8, 10])
+
+_NOTE_SEMITONES_A: dict[str, int] = {
+    "C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
+    "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7, "G#": 8,
+    "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11,
+}
+
+
+def _diatonic_count(chord_labels_window: list, key_str: str) -> int:
+    """Count chords in the window whose root is diatonic to key_str."""
+    parts = key_str.strip().split()
+    tonic = parts[0] if parts else "C"
+    mode = parts[1].lower() if len(parts) > 1 else "major"
+    intervals = _MAJOR_INTERVALS if mode == "major" else _MINOR_INTERVALS
+    tonic_semi = _NOTE_SEMITONES_A.get(tonic, 0)
+    count = 0
+    for measure in chord_labels_window:
+        for _, sym in measure:
+            if sym in ("N.C.", "NC", ""):
+                continue
+            sym_clean = sym.split("/")[0]
+            if sym_clean.endswith("?"):
+                sym_clean = sym_clean[:-1]
+            root = sym_clean[:2] if len(sym_clean) > 1 and sym_clean[1] in ("#", "b") else sym_clean[:1]
+            note_semi = _NOTE_SEMITONES_A.get(root)
+            if note_semi is None:
+                continue
+            if (note_semi - tonic_semi) % 12 in intervals:
+                count += 1
+    return count
+
+
+def refine_key_with_chords(
+    key_labels: list[str],
+    chord_labels: list,
+    window: int = 8,
+) -> list[str]:
+    """Re-score key labels using diatonic chord membership to resolve parallel-key ambiguity.
+
+    For each sliding window of `window` measures, counts how many chord roots are diatonic
+    to the current key vs the parallel key (same tonic, opposite mode). If the parallel key
+    achieves a significantly higher diatonic count (> 1.3×), the window is re-assigned.
+
+    This resolves A major vs A minor confusion that pure chroma matching cannot distinguish.
+    """
+    n = len(key_labels)
+    refined = list(key_labels)
+    stride = max(1, window // 2)
+
+    for i in range(0, n, stride):
+        w_end = min(i + window, n)
+        current_key = key_labels[i]
+        parts = current_key.split()
+        tonic = parts[0] if parts else "C"
+        mode = parts[1].lower() if len(parts) > 1 else "major"
+        parallel_mode = "minor" if mode == "major" else "major"
+        parallel_key = f"{tonic} {parallel_mode}"
+
+        window_chords = chord_labels[i:w_end]
+        current_score = _diatonic_count(window_chords, current_key)
+        parallel_score = _diatonic_count(window_chords, parallel_key)
+
+        if parallel_score > current_score * 1.3:
+            for j in range(i, w_end):
+                refined[j] = parallel_key
+
+    changes = [i for i in range(n) if key_labels[i] != refined[i]]
+    if changes:
+        logger.info(
+            "Key refinement via chord analysis: %d measure(s) changed, first at m%d (%s → %s)",
+            len(changes), changes[0], key_labels[changes[0]], refined[changes[0]],
+        )
+    return refined
+
+
 def _estimate_time_signature(
     y: np.ndarray, sr: int, tempo: float
 ) -> tuple[int, int]:

@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
-from .analyzer import AudioAnalysis, analyze_audio, build_measure_grid, detect_first_onset, detect_key_per_section
+from .analyzer import (
+    AudioAnalysis,
+    analyze_audio,
+    build_measure_grid,
+    detect_first_onset,
+    detect_key_per_section,
+    refine_key_with_chords,
+)
 from .chord_detector import detect_chords_per_measure
 from .config import AUDIO_DIR, MIDI_DIR, SAMPLE_RATE, SCORES_DIR, STEMS_DIR
 from .downloader import SongMetadata, download_audio
@@ -172,21 +179,32 @@ def _run_from_metadata(
         initial_key=analysis.key,
     )
 
-    # Demucs bass separation → clean bass line for accurate inversion-slash notation.
+    # Demucs stem separation → clean bass for inversion-slash + harmonic mix for BTC.
     # Optional: on failure the chord detector falls back to a full-mix low chroma.
     cb("베이스 분리 중... (수 분 소요)", 0.40)
-    bass_stem_path = separate_bass_cached(
+    sep_result = separate_bass_cached(
         song_metadata.audio_path,
         progress_cb=lambda p: cb("베이스 분리 중... (수 분 소요)", 0.40 + p * 0.05),
     )
 
+    bass_stem_path = sep_result.bass_path if sep_result else None
+
+    # Build harmonic submix (vocals + other + α·bass, drums removed) for BTC.
+    # Bass fundamentals (e.g. D2) contaminate the full-mix CQT and cause BTC to
+    # mis-label A/Am as D in heavily bass-driven sections. Removing drums and
+    # attenuating bass reduces this contamination without sacrificing harmony signal.
+    btc_input_path: Optional[Path] = None
+    if sep_result and sep_result.vocals_path and sep_result.other_path:
+        btc_input_path = _build_harmonic_mix(sep_result, song_metadata.audio_path)
+
     cb("코드 진행 분석 중...", 0.45)
     chord_labels = detect_chords_per_measure(
-        audio_path=song_metadata.audio_path,   # full mix: harmony needed for chord quality
+        audio_path=song_metadata.audio_path,   # full mix: fallback if no submix
         bpm=analysis.bpm,
         time_sig_num=analysis.time_signature_num,
         measure_grid=measure_grid,
         bass_stem_path=bass_stem_path,          # clean bass for inversion-slash
+        btc_input_path=btc_input_path,          # harmonic submix for BTC (or None → full mix)
     )
 
     # Drop leading and trailing N.C.-only measures (silent intro / outro).
@@ -213,6 +231,9 @@ def _run_from_metadata(
         key_labels = key_labels[: len(key_labels) - trailing_nc]
 
     cb("도수 분석 중...", 0.70)
+    # Refine key labels using actual chord content to resolve parallel-key ambiguity
+    # (e.g. A major vs A minor when chroma is ambiguous).
+    key_labels = refine_key_with_chords(key_labels, chord_labels)
     roman_labels = measures_to_roman(chord_labels, key_labels)
     logger.info("Roman degrees (first 6): %s", roman_labels[:6])
 
@@ -248,6 +269,45 @@ def _run_from_metadata(
         key_labels=key_labels,
         export=export,
     )
+
+
+def _build_harmonic_mix(sep_result, audio_path: Path, alpha: float = 0.3) -> Optional[Path]:
+    """Build vocals + other + alpha*bass mix (no drums) for BTC input.
+
+    Removes drums (which contribute no harmonic content) and attenuates bass
+    (reduces CQT contamination from bass fundamentals that cause D/Dm mis-labels).
+    Returns None on any failure so callers fall back to the full mix.
+    """
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        vocals_p = sep_result.vocals_path
+        other_p = sep_result.other_path
+        bass_p = sep_result.bass_path
+
+        v, sr = sf.read(str(vocals_p), dtype="float32", always_2d=True)
+        o, _ = sf.read(str(other_p), dtype="float32", always_2d=True)
+        b = np.zeros_like(v)
+        if bass_p and bass_p.is_file():
+            b, _ = sf.read(str(bass_p), dtype="float32", always_2d=True)
+
+        n = min(v.shape[0], o.shape[0], b.shape[0])
+        mix = v[:n] + o[:n] + alpha * b[:n]
+
+        mix_path = vocals_p.parent / f"harmonic_mix_a{alpha:.2f}.wav"
+        if not mix_path.exists():
+            sf.write(str(mix_path), mix, sr)
+            logger.info(
+                "Harmonic mix created: %s (alpha=%.2f, %dKB)",
+                mix_path, alpha, mix_path.stat().st_size // 1024,
+            )
+        else:
+            logger.debug("Reusing cached harmonic mix: %s", mix_path)
+        return mix_path
+    except Exception as exc:
+        logger.warning("Harmonic mix failed (%s); BTC will use full mix", exc)
+        return None
 
 
 def _ensure_wav(audio_path: Path, cb: Callable) -> Path:

@@ -408,18 +408,25 @@ def _measure_cell_parts(measure, beats: int) -> tuple[str, str]:
             above.append((off, te.content))
     above.sort(key=lambda x: x[0])
 
+    def _chord_mu(sym: str) -> str:
+        """Wrap chord symbol: uncertain (?) chords get a small grey '?' suffix."""
+        if sym.endswith("?"):
+            core = _esc(sym[:-1])
+            return f'\\line {{ "{core}" \\fontsize #-4 \\with-color #(x11-color \'grey) "?" }}'
+        return f'"{_esc(sym)}"'
+
     if key_marker and above:
         # Prepend key-change marker as smaller bold text before the first chord symbol.
         first_off, first_sym = above[0]
         km_mu = f'\\fontsize #-3 \\bold "{_esc(key_marker)}"'
-        first_mu = f'\\line {{ {km_mu} \\hspace #0.4 "{_esc(first_sym)}" }}'
+        first_mu = f'\\line {{ {km_mu} \\hspace #0.4 {_chord_mu(first_sym)} }}'
         chord_items = [(first_off, first_mu)] + [
-            (off, f'"{_esc(sym)}"') for off, sym in above[1:]
+            (off, _chord_mu(sym)) for off, sym in above[1:]
         ]
     elif key_marker:
         chord_items = [(0.0, f'\\fontsize #-3 \\bold "{_esc(key_marker)}"')]
     else:
-        chord_items = [(off, f'"{_esc(sym)}"') for off, sym in above]
+        chord_items = [(off, _chord_mu(sym)) for off, sym in above]
 
     # \large \bold per item (NOT around the whole cell, which would scale the width strut
     # and break alignment with the chord row above).
