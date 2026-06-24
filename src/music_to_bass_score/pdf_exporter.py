@@ -386,7 +386,7 @@ def _positioned_cell(items: list[tuple[float, str]], beats: int) -> str:
     return _combine_markups(parts)
 
 
-def _measure_cell_parts(measure, beats: int) -> tuple[str, str]:
+def _measure_cell_parts(measure, beats: int, m_number: int | None = None) -> tuple[str, str]:
     """Return (chord_markup, degree_markup) for one measure, each a fixed-width cell.
 
     Repeated chords are already collapsed upstream, so each measure carries only its
@@ -433,6 +433,10 @@ def _measure_cell_parts(measure, beats: int) -> tuple[str, str]:
     deg_items = [(off, f'\\large \\bold "{_esc(below.get(off, ""))}"') for off, _ in above]
 
     chord_cell = _positioned_cell(chord_items, beats)
+    if m_number is not None:
+        # Overlay small measure number at top-left corner of the first cell in each row.
+        num_mu = f"\\translate #'(0 . 1.8) \\fontsize #-4 \"{m_number}\""
+        chord_cell = f'\\combine {num_mu} {chord_cell}'
     deg_cell = _positioned_cell(deg_items, beats)
     return chord_cell, deg_cell
 
@@ -464,7 +468,10 @@ def _chart_to_ly(score: stream.Score, stem: str) -> str:
     bpm = int(round(mm[0].number)) if mm else 120
 
     measures = list(part.getElementsByClass('Measure'))
-    cells = [_measure_cell_parts(m, beats) for m in measures]
+    cells = [
+        _measure_cell_parts(m, beats, m_number=(idx + 1) if idx % _MEASURES_PER_LINE == 0 else None)
+        for idx, m in enumerate(measures)
+    ]
 
     # Internal measure-divider: \filled-box reports its extent to LilyPond so
     # \rounded-box can compute the correct box height (unlike \draw-line which has
